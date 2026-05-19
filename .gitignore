@@ -1,0 +1,7 @@
+/target
+/.idea
+*.exe
+*.dll
+*.pck
+/test_files
+*.fits
