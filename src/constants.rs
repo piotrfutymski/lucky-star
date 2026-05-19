@@ -9,6 +9,7 @@ lazy_static! {
         m.insert(9000, 61.5);
         m.insert(12000, 143.);
         m.insert(15000, 250.);
+        m.insert(0, 250.);
         m
     };
 }

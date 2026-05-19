@@ -8,7 +8,7 @@ use std::path::Path;
 use ndarray::{Array, Array1, IxDyn};
 use rand::RngExt;
 use rustronomy_fits::{Extension, Fits, Header};
-use crate::constants::{GAIN_ADU, MIN_CENTRAL_PHOTONS_TO_DETECT_STAR, MIN_PHOTONS_TO_DETECT_STAR, PSF_SIZE, PSF_SIZE_SQR};
+use crate::constants::{GAIN_ADU, MIN_CENTRAL_PHOTONS_TO_DETECT_STAR, MIN_PHOTONS_TO_DETECT_STAR};
 use crate::star::Star;
 
 pub struct AstroImage {
@@ -21,18 +21,20 @@ pub struct AstroImage {
     background_level_adu: u16,
     sigma_adu: u16,
 
+    psf_size: usize,
     detected_stars: Vec<Star>,
     data: Array<i16, IxDyn>,
     quality: f64
 }
 
 impl AstroImage {
-    pub fn load(file: impl AsRef<Path>, crop: Option<f64>, min_photons_quality: f64) -> Result<AstroImage, Box<dyn Error>> {
+    pub fn load(file: impl AsRef<Path>, crop: Option<f64>, min_photons_quality: f64, psf_size: usize) -> Result<AstroImage, Box<dyn Error>> {
         let fits = Fits::open(file.as_ref())?;
 
         let error_msg = format!("Can not get data from fit file: {:?}", file.as_ref());
         let header = fits.get_hdu(0).expect(error_msg.as_str()).get_header();
         let mut res = Self::get_data_from_header(header)?;
+        res.psf_size = psf_size;
 
         let data_array = match fits.get_hdu(0).expect(error_msg.as_str()).get_data() {
             Some(Extension::Image(img)) => img.as_i16_array()?,
@@ -47,8 +49,8 @@ impl AstroImage {
     fn get_data_from_header(header: &Header) -> Result<AstroImage, Box<dyn Error>> {
         let width: u32 = header.get_value_as("NAXIS1")?;
         let height: u32 = header.get_value_as("NAXIS2")?;
-        let exp_t: f64 = header.get_value_as("EXPOSURE")?;
-        let gain: u32 = header.get_value_as("GAIN")?;
+        let exp_t: f64 = header.get_value_as("EXPOSURE").unwrap_or(0.0);
+        let gain: u32 = header.get_value_as("GAIN").unwrap_or(0);
         let adu_e: f64 = *GAIN_ADU.get(&gain).expect(format!("No adu_e defined for gain {}", gain).as_str());
         let res = Self {
             width,
@@ -61,6 +63,7 @@ impl AstroImage {
             detected_stars: vec![],
             data: Array::zeros(IxDyn(&[0, 0])),
             quality: 0.0,
+            psf_size: 0,
         };
         Ok(res)
     }
@@ -102,18 +105,19 @@ impl AstroImage {
     }
 
     fn find_stars(&mut self, data: &Array<i16, IxDyn>, crop: Option<f64>) {
+        let psf_size = self.psf_size;
         let min_v = self.background_level_adu + (self.adu_e * MIN_CENTRAL_PHOTONS_TO_DETECT_STAR as f64) as u16;
         let max_v = 0.7 * u16::MAX as f64;
         let mut potential_stars = HashMap::new();
         let (i_start, i_end, j_start, j_end) = if let Some(c) = crop {
             let c = c.clamp(0.0, 1.0);
-            let margin_w = ((self.width as f64 * (1.0 - c) / 2.0) as usize).max(PSF_SIZE);
-            let margin_h = ((self.height as f64 * (1.0 - c) / 2.0) as usize).max(PSF_SIZE);
-            let i_end = (self.width as usize - margin_w).min(self.width as usize - PSF_SIZE);
-            let j_end = (self.height as usize - margin_h).min(self.height as usize - PSF_SIZE);
+            let margin_w = ((self.width as f64 * (1.0 - c) / 2.0) as usize).max(psf_size);
+            let margin_h = ((self.height as f64 * (1.0 - c) / 2.0) as usize).max(psf_size);
+            let i_end = (self.width as usize - margin_w).min(self.width as usize - psf_size);
+            let j_end = (self.height as usize - margin_h).min(self.height as usize - psf_size);
             (margin_w, i_end, margin_h, j_end)
         } else {
-            (PSF_SIZE, self.width as usize - PSF_SIZE, PSF_SIZE, self.height as usize - PSF_SIZE)
+            (psf_size, self.width as usize - psf_size, psf_size, self.height as usize - psf_size)
         };
         for i in i_start..i_end {
             for j in j_start..j_end {
@@ -157,7 +161,7 @@ impl AstroImage {
                 if j <= i {
                     continue;
                 }
-                if (compare_pos.0 as i32 - pos.0 as i32).pow(2) + (compare_pos.1 as i32 - pos.1 as i32).pow(2) < PSF_SIZE_SQR as i32 {
+                if (compare_pos.0 as i32 - pos.0 as i32).pow(2) + (compare_pos.1 as i32 - pos.1 as i32).pow(2) < (psf_size * psf_size) as i32 {
                     to_delete.insert(i);
                     to_delete.insert(j);
                     break;
@@ -171,9 +175,20 @@ impl AstroImage {
         }
         let mut stars = star_pos
             .iter()
-            .map(|&i| Star::new(i, data, self.adu_e, self.background_level_adu))
+            .map(|&i| Star::new(i, data, self.adu_e, self.background_level_adu, psf_size))
             .filter(|s| !s.ill_defined && s.magnitude > MIN_PHOTONS_TO_DETECT_STAR as f64 && s.brightest_pixel_adu < max_v)
             .collect::<Vec<_>>();
+        if !stars.is_empty() {
+            let mut top4_vals: Vec<f64> = stars.iter().map(|s| s.top_4_pixels_part).collect();
+            top4_vals.sort_by(|a, b| a.total_cmp(b));
+            let n = top4_vals.len();
+            let median = if n % 2 == 0 {
+                (top4_vals[n / 2 - 1] + top4_vals[n / 2]) / 2.0
+            } else {
+                top4_vals[n / 2]
+            };
+            stars.retain(|s| s.top_4_pixels_part >= median / 2.0);
+        }
         stars.sort_by(|a, b| b.magnitude.partial_cmp(&a.magnitude).unwrap_or(Ordering::Equal));
         self.detected_stars = stars;
     }

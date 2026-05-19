@@ -35,7 +35,11 @@ struct Args {
 
     /// Min flux in photons to account for quality
     #[arg(long, default_value_t = 200.0)]
-    min_photons_quality: f64
+    min_photons_quality: f64,
+
+    /// PSF window size in pixels used for star detection and flux measurement
+    #[arg(long, default_value_t = 13)]
+    psf_size: usize
 }
 
 struct ImageInfo {
@@ -47,8 +51,8 @@ struct ImageInfo {
 
 
 
-fn process_single_file(path: &Path, crop: Option<f64>, save_stars: bool, min_photons_quality: f64) {
-    let img = AstroImage::load(path, crop, min_photons_quality).unwrap();
+fn process_single_file(path: &Path, crop: Option<f64>, save_stars: bool, min_photons_quality: f64, psf_size: usize) {
+    let img = AstroImage::load(path, crop, min_photons_quality, psf_size).unwrap();
     print!("{}", img);
     if save_stars {
         let stem = path.file_stem().unwrap_or_default().to_string_lossy();
@@ -77,12 +81,12 @@ fn collect_fits_files(dir: &Path) -> Vec<fs::DirEntry> {
     entries
 }
 
-fn load_images(entries: Vec<fs::DirEntry>, crop: Option<f64>, min_photons_quality: f64) -> Vec<ImageInfo> {
+fn load_images(entries: Vec<fs::DirEntry>, crop: Option<f64>, min_photons_quality: f64, psf_size: usize) -> Vec<ImageInfo> {
     let mut images = Vec::new();
     for entry in entries {
         let file_path = entry.path();
         let file_name = entry.file_name().to_string_lossy().to_string();
-        match AstroImage::load(&file_path, crop, min_photons_quality) {
+        match AstroImage::load(&file_path, crop, min_photons_quality, psf_size) {
             Ok(img) => {
                 print!("{}", img.brief_summary());
                 images.push(ImageInfo {
@@ -172,7 +176,7 @@ fn remove_original_images(images: &[ImageInfo]) {
 
 fn process_directory(dir: &Path, args: &Args) {
     let entries = collect_fits_files(dir);
-    let images = load_images(entries, args.crop, args.min_photons_quality);
+    let images = load_images(entries, args.crop, args.min_photons_quality, args.psf_size);
 
     let threshold_info = if !images.is_empty() { Some(compute_star_threshold(&images)) } else { None };
     write_quality_map(dir, &images, threshold_info.map(|info| info.1));
@@ -198,7 +202,7 @@ fn main() {
     let path = Path::new(&args.path);
 
     if path.is_file() {
-        process_single_file(path, args.crop, args.save_stars, args.min_photons_quality);
+        process_single_file(path, args.crop, args.save_stars, args.min_photons_quality, args.psf_size);
     } else if path.is_dir() {
         process_directory(path, &args);
     } else {
