@@ -837,6 +837,9 @@ dependencies = [
  "ndarray",
  "rand 0.10.1",
  "rustronomy-fits",
+ "serde",
+ "serde_json",
+ "vector2d",
 ]
 
 [[package]]
@@ -1389,6 +1392,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -1567,6 +1571,12 @@ dependencies = [
  "num-traits",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "vector2d"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "567b2fa9c7ae37b0c180cdda3aebed26cbbd81344bcfeedd7650eeb8088b5a7b"
 
 [[package]]
 name = "wasi"

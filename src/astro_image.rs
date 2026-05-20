@@ -10,6 +10,7 @@ use rand::RngExt;
 use rustronomy_fits::{Extension, Fits, Header};
 use crate::constants::{GAIN_ADU, MIN_CENTRAL_PHOTONS_TO_DETECT_STAR, MIN_PHOTONS_TO_DETECT_STAR};
 use crate::star::Star;
+use vector2d::Vector2D;
 
 pub struct AstroImage {
     width: u32,
@@ -24,7 +25,8 @@ pub struct AstroImage {
     psf_size: usize,
     detected_stars: Vec<Star>,
     data: Array<i16, IxDyn>,
-    quality: f64
+    quality: f64,
+    quality_star_indices: Option<Vec<usize>>,
 }
 
 impl AstroImage {
@@ -64,6 +66,7 @@ impl AstroImage {
             data: Array::zeros(IxDyn(&[0, 0])),
             quality: 0.0,
             psf_size: 0,
+            quality_star_indices: None,
         };
         Ok(res)
     }
@@ -175,7 +178,7 @@ impl AstroImage {
         }
         let mut stars = star_pos
             .iter()
-            .map(|&i| Star::new(i, data, self.adu_e, self.background_level_adu, psf_size))
+            .map(|&i| Star::new(Vector2D::new(i.0, i.1), data, self.adu_e, self.background_level_adu, psf_size))
             .filter(|s| !s.ill_defined && s.magnitude > MIN_PHOTONS_TO_DETECT_STAR as f64 && s.brightest_pixel_adu < max_v)
             .collect::<Vec<_>>();
         if !stars.is_empty() {
@@ -215,8 +218,8 @@ impl AstroImage {
         }
 
         for (i, star) in self.detected_stars.iter().enumerate() {
-            let cx = star.pos.0 as i32;
-            let cy = star.pos.1 as i32;
+            let cx = star.pos.x as i32;
+            let cy = star.pos.y as i32;
             imageproc::drawing::draw_hollow_circle_mut(
                 &mut img,
                 (cx, cy),
@@ -240,7 +243,7 @@ impl AstroImage {
             writeln!(
                 file,
                 "| {} | {} | {} | {:.0} | {:.0} | {:.0} | {:.4} | {:.4} |",
-                i + 1, s.pos.0, s.pos.1,
+                i + 1, s.pos.x, s.pos.y,
                 s.magnitude, s.magnitude_adu, s.brightest_pixel_adu,
                 s.brightest_pixel_part, s.top_4_pixels_part
             )?;
@@ -258,6 +261,31 @@ impl AstroImage {
 
     pub fn brief_summary(&self) -> BriefSummary<'_> {
         BriefSummary(self)
+    }
+    
+    pub fn stars(&self) -> &Vec<Star> {&self.detected_stars}
+
+    pub fn stars_with_magnitude_between(&self, min_magnitude: f64, max_magnitude: f64) -> Vec<usize> {
+        let start = self.detected_stars.partition_point(|s| s.magnitude > max_magnitude);
+        let end = self.detected_stars.partition_point(|s| s.magnitude >= min_magnitude);
+        self.detected_stars[start..end].iter().enumerate().map(|(i,_)| start + i).collect()
+    }
+
+    pub fn recalculate_quality_for_star_indices(&mut self, indices: &std::collections::HashSet<usize>, min_photons_quality: f64) {
+        let mut quality_sum = 0.0;
+        let mut mag_sum = 0.0;
+        let mut used_indices: Vec<usize> = Vec::new();
+        for (i, s) in self.detected_stars.iter().enumerate() {
+            if indices.contains(&i) && s.magnitude > min_photons_quality {
+                quality_sum += s.magnitude * s.top_4_pixels_part;
+                mag_sum += s.magnitude;
+                used_indices.push(i);
+            }
+        }
+        if mag_sum > 0.0 {
+            self.quality = quality_sum / mag_sum;
+        }
+        self.quality_star_indices = Some(used_indices);
     }
 
     fn fmt_impl(&self, f: &mut Formatter<'_>, max_stars: usize) -> std::fmt::Result {
@@ -293,13 +321,17 @@ impl AstroImage {
         writeln!(f, "│  Stars found  : {:>8}                │", n)?;
         writeln!(f, "│  Avg top4     : {:>8.2} %              │", avg_top4 * 100.0)?;
         writeln!(f, "│  Median top4  : {:>8.2} %              │", median_top4 * 100.0)?;
+        if let Some(ref qi) = self.quality_star_indices {
+            writeln!(f, "├─────────────────────────────────────────┤")?;
+            writeln!(f, "│  Quality from : {:>4} constellation star │", qi.len())?;
+        }
         writeln!(f, "│  QUALITY      : {:>8.2} %              │", self.quality * 100.0)?;
         writeln!(f, "└─────────────────────────────────────────┘")?;
 
         let star_row = |f: &mut Formatter<'_>, i: usize, s: &Star| -> std::fmt::Result {
             writeln!(f,
                 "│{:>3} │({:>4},{:>4})   │{:>8.2}    │{:>10.0}  │{:>10.0}  │{:>10.4}  │{:>10.4}  │",
-                i + 1, s.pos.0, s.pos.1,
+                i + 1, s.pos.x, s.pos.y,
                 s.magnitude, s.magnitude_adu, s.brightest_pixel_adu,
                 s.brightest_pixel_part, s.top_4_pixels_part)
         };
@@ -312,12 +344,22 @@ impl AstroImage {
         };
         let footer = "└────┴──────────────┴────────────┴────────────┴────────────┴────────────┴────────────┘";
 
-        let mut by_top4: Vec<&Star> = self.detected_stars.iter().collect();
-        by_top4.sort_by(|a, b| b.top_4_pixels_part.total_cmp(&a.top_4_pixels_part));
-        writeln!(f, "\n  Top {} Stars — Best Top-4 Pixel Concentration", max_stars)?;
-        for line in header() { writeln!(f, "{}", line)?; }
-        for (i, s) in by_top4.iter().take(max_stars).enumerate() { star_row(f, i, s)?; }
-        writeln!(f, "{}", footer)
+        if let Some(ref qi) = self.quality_star_indices {
+            writeln!(f, "\n  Top {} Constellation Quality Stars", max_stars)?;
+            for line in header() { writeln!(f, "{}", line)?; }
+            let shown = qi.iter().take(max_stars);
+            for (i, &idx) in shown.enumerate() {
+                star_row(f, i, &self.detected_stars[idx])?;
+            }
+            writeln!(f, "{}", footer)
+        } else {
+            let mut by_top4: Vec<&Star> = self.detected_stars.iter().collect();
+            by_top4.sort_by(|a, b| b.top_4_pixels_part.total_cmp(&a.top_4_pixels_part));
+            writeln!(f, "\n  Top {} Stars — Best Top-4 Pixel Concentration", max_stars)?;
+            for line in header() { writeln!(f, "{}", line)?; }
+            for (i, s) in by_top4.iter().take(max_stars).enumerate() { star_row(f, i, s)?; }
+            writeln!(f, "{}", footer)
+        }
     }
 }
 

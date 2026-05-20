@@ -1,7 +1,8 @@
 use ndarray::{Array, IxDyn};
+use vector2d::Vector2D;
 
 pub struct Star {
-    pub pos: (usize, usize),
+    pub pos: Vector2D<usize>,
     pub magnitude: f64,
     pub magnitude_adu: f64,
     //pub fwhm: f64,
@@ -14,12 +15,12 @@ pub struct Star {
 impl Star {
 
 
-    pub fn new(pos: (usize, usize), data: &Array<i16, IxDyn>, adu_e: f64, background_adu: u16, psf_size: usize) -> Star {
-        let brightest_pixel = (data[[pos.0, pos.1]].wrapping_sub(i16::MIN) as u16 - background_adu) as i32;
+    pub fn new(pos: Vector2D<usize>, data: &Array<i16, IxDyn>, adu_e: f64, background_adu: u16, psf_size: usize) -> Star {
+        let brightest_pixel = (data[[pos.x, pos.y]].wrapping_sub(i16::MIN) as u16 - background_adu) as i32;
         let mut brightest_pixels = [0, 0, 0, 0];
         let mut magnitude = 0.0;
-        for i in pos.0-psf_size/2..=pos.0+psf_size/2 {
-            for j in pos.1-psf_size/2..=pos.1+psf_size/2 {
+        for i in pos.x-psf_size/2..=pos.x+psf_size/2 {
+            for j in pos.y-psf_size/2..=pos.y+psf_size/2 {
                 let v = data[[i, j]].wrapping_sub(i16::MIN) as u16;
                 let pixel_brightness = v as i32 - background_adu as i32;
                 if pixel_brightness > brightest_pixels[0]{
