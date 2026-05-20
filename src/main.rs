@@ -168,9 +168,9 @@ fn compute_star_threshold(images: &[ImageInfo]) -> (usize, usize) {
 }
 
 fn select_best_images(images: &[ImageInfo], take_pct: f64, median_stars: usize, low_star_threshold: usize, use_constellation: bool) -> HashSet<&str> {
-    let take_pct = take_pct.clamp(0.0, 100.0);
+    let take_pct = take_pct.clamp(0.0, 1.0);
     let total = images.len();
-    let count_to_take = ((total as f64 * take_pct / 100.0).ceil() as usize)
+    let count_to_take = ((total as f64 * take_pct).ceil() as usize)
         .max(1)
         .min(total);
 
@@ -180,7 +180,7 @@ fn select_best_images(images: &[ImageInfo], take_pct: f64, median_stars: usize, 
         images.iter().filter(|i| i.star_count >= low_star_threshold).collect()
     };
 
-    let rejected_by_img_quality = if take_pct <= 80.0 {
+    let rejected_by_img_quality = if take_pct <= 0.8 {
         let reject_count = (eligible.len() as f64 * 0.2).floor() as usize;
         if reject_count > 0 {
             eligible.sort_by(|a, b| {
