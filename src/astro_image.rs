@@ -8,9 +8,9 @@ use std::path::Path;
 use ndarray::{Array, Array1, IxDyn};
 use rand::RngExt;
 use rustronomy_fits::{Extension, Fits, Header};
-use crate::constants::{GAIN_ADU, MIN_CENTRAL_PHOTONS_TO_DETECT_STAR, MIN_PHOTONS_TO_DETECT_STAR};
 use crate::star::Star;
 use vector2d::Vector2D;
+use crate::AppConfig;
 
 pub struct AstroImage {
     width: u32,
@@ -31,30 +31,30 @@ pub struct AstroImage {
 }
 
 impl AstroImage {
-    pub fn load(file: impl AsRef<Path>, crop: Option<f64>, min_photons_quality: f64, psf_size: usize) -> Result<AstroImage, Box<dyn Error>> {
+    pub fn load(file: impl AsRef<Path>, crop: Option<f64>, config: &AppConfig) -> Result<AstroImage, Box<dyn Error>> {
         let fits = Fits::open(file.as_ref())?;
 
         let error_msg = format!("Can not get data from fit file: {:?}", file.as_ref());
         let header = fits.get_hdu(0).expect(error_msg.as_str()).get_header();
-        let mut res = Self::get_data_from_header(header)?;
-        res.psf_size = psf_size;
+        let mut res = Self::get_data_from_header(header, config)?;
+        res.psf_size = config.psf_size;
 
         let data_array = match fits.get_hdu(0).expect(error_msg.as_str()).get_data() {
             Some(Extension::Image(img)) => img.as_i16_array()?,
             _ => Err(error_msg.clone())?,
         };
 
-        res.detect_stars(data_array, crop, min_photons_quality);
+        res.detect_stars(data_array, crop, config);
         res.data = data_array.clone();
         Ok(res)
     }
 
-    fn get_data_from_header(header: &Header) -> Result<AstroImage, Box<dyn Error>> {
+    fn get_data_from_header(header: &Header, config: &AppConfig) -> Result<AstroImage, Box<dyn Error>> {
         let width: u32 = header.get_value_as("NAXIS1")?;
         let height: u32 = header.get_value_as("NAXIS2")?;
         let exp_t: f64 = header.get_value_as("EXPOSURE").unwrap_or(0.0);
         let gain: u32 = header.get_value_as("GAIN").unwrap_or(0);
-        let adu_e: f64 = *GAIN_ADU.get(&gain).expect(format!("No adu_e defined for gain {}", gain).as_str());
+        let adu_e: f64 = *config.gain_to_adu.get(&gain).expect(format!("No adu_e defined for gain {}", gain).as_str());
         let res = Self {
             width,
             height,
@@ -73,14 +73,14 @@ impl AstroImage {
         Ok(res)
     }
 
-    fn detect_stars(&mut self, data: &Array<i16, IxDyn>, crop: Option<f64>, min_photons_quality: f64) {
+    fn detect_stars(&mut self, data: &Array<i16, IxDyn>, crop: Option<f64>, config: &AppConfig) {
         self.extract_global_image_metadata(data);
-        self.find_stars(data, crop);
+        self.find_stars(data, crop, config);
         let mut quality_sum = 0.0;
         let mut mag_sum = 0.0;
         self.detected_stars
             .iter()
-            .filter(|star| { star.magnitude > min_photons_quality })
+            .filter(|star| { star.magnitude > config.min_photons_quality })
             .for_each(|s| {
                 quality_sum += s.magnitude * s.top_4_pixels_part;
                 mag_sum += s.magnitude;
@@ -109,9 +109,9 @@ impl AstroImage {
         self.sigma_adu = sigma as u16;
     }
 
-    fn find_stars(&mut self, data: &Array<i16, IxDyn>, crop: Option<f64>) {
+    fn find_stars(&mut self, data: &Array<i16, IxDyn>, crop: Option<f64>, config: &AppConfig) {
         let psf_size = self.psf_size;
-        let min_v = self.background_level_adu + (self.adu_e * MIN_CENTRAL_PHOTONS_TO_DETECT_STAR as f64) as u16;
+        let min_v = self.background_level_adu + (self.adu_e * config.min_central_photons_to_detect_star as f64) as u16;
         let max_v = 0.7 * u16::MAX as f64;
         let mut potential_stars = HashMap::new();
         let (i_start, i_end, j_start, j_end) = if let Some(c) = crop {
@@ -181,7 +181,7 @@ impl AstroImage {
         let mut stars = star_pos
             .iter()
             .map(|&i| Star::new(Vector2D::new(i.0, i.1), data, self.adu_e, self.background_level_adu, psf_size))
-            .filter(|s| !s.ill_defined && s.magnitude > MIN_PHOTONS_TO_DETECT_STAR as f64 && s.brightest_pixel_adu < max_v)
+            .filter(|s| !s.ill_defined && s.magnitude > config.min_photons_to_detect_star as f64 && s.brightest_pixel_adu < max_v)
             .collect::<Vec<_>>();
         if !stars.is_empty() {
             let mut top4_vals: Vec<f64> = stars.iter().map(|s| s.top_4_pixels_part).collect();
@@ -265,10 +265,6 @@ impl AstroImage {
         self.detected_stars.len()
     }
 
-    pub fn brief_summary(&self) -> BriefSummary<'_> {
-        BriefSummary(self)
-    }
-    
     pub fn stars(&self) -> &Vec<Star> {&self.detected_stars}
 
     pub fn stars_with_magnitude_between(&self, min_magnitude: f64, max_magnitude: f64) -> Vec<usize> {
@@ -277,12 +273,12 @@ impl AstroImage {
         self.detected_stars[start..end].iter().enumerate().map(|(i,_)| start + i).collect()
     }
 
-    pub fn recalculate_quality_for_star_indices(&mut self, indices: &std::collections::HashSet<usize>, min_photons_quality: f64) {
+    pub fn recalculate_quality_for_star_indices(&mut self, indices: &HashSet<usize>, config: &AppConfig) {
         let mut quality_sum = 0.0;
         let mut mag_sum = 0.0;
         let mut used_indices: Vec<usize> = Vec::new();
         for (i, s) in self.detected_stars.iter().enumerate() {
-            if indices.contains(&i) && s.magnitude > min_photons_quality {
+            if indices.contains(&i) && s.magnitude > config.min_photons_quality {
                 quality_sum += s.magnitude * s.top_4_pixels_part;
                 mag_sum += s.magnitude;
                 used_indices.push(i);
@@ -354,7 +350,7 @@ impl AstroImage {
         };
         let footer = "└────┴──────────────┴────────────┴────────────┴────────────┴────────────┴────────────┘";
 
-        if let Some(ref qi) = self.quality_star_indices {
+        if let Some(ref qi) = self.quality_star_indices && !qi.is_empty() {
             writeln!(f, "\n  Top {} Constellation Quality Stars", max_stars)?;
             for line in header() { writeln!(f, "{}", line)?; }
             let shown = qi.iter().take(max_stars);
@@ -378,14 +374,6 @@ impl AstroImage {
 impl Display for AstroImage {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         self.fmt_impl(f, 10)
-    }
-}
-
-pub struct BriefSummary<'a>(pub &'a AstroImage);
-
-impl Display for BriefSummary<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt_impl(f, 3)
     }
 }
 const DIGIT_BITMAPS: [[u8; 15]; 10] = [

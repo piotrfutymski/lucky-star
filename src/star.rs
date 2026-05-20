@@ -5,7 +5,6 @@ pub struct Star {
     pub pos: Vector2D<usize>,
     pub magnitude: f64,
     pub magnitude_adu: f64,
-    //pub fwhm: f64,
     pub brightest_pixel_adu: f64,
     pub brightest_pixel_part: f64,
     pub top_4_pixels_part: f64,

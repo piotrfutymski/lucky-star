@@ -1,0 +1,16 @@
+
+{
+	"gain_to_adu": {
+		"5200": 27.5,
+		"7000": 40.0,
+		"9000": 61.5,
+		"12000": 143.0,
+		"15000": 250.0,
+		"0": 250.0
+	},
+	"min_photons_to_detect_star": 150,
+	"min_central_photons_to_detect_star": 12,
+	"psf_size": 13,
+	"min_photons_quality": 200.0,
+	"rolling_avg_window": 100
+}
