@@ -323,7 +323,7 @@ fn compute_star_threshold(images: &[ImageInfo]) -> (usize, usize) {
     let threshold = (median as f64 * 0.7) as usize;
     (median, threshold)
 }
-fn select_best_by_quality(images: &[ImageInfo], take_pct: f64, median_stars: usize, low_star_threshold: usize, use_constellation: bool) -> HashSet<&str> {
+fn select_best_by_percent(images: &[ImageInfo], take_pct: f64, median_stars: usize, low_star_threshold: usize, use_constellation: bool) -> HashSet<&str> {
     let take_pct = take_pct.clamp(0.0, 1.0);
     let total = images.len();
     let count_to_take = ((total as f64 * take_pct).ceil() as usize)
@@ -358,12 +358,8 @@ fn select_best_by_quality(images: &[ImageInfo], take_pct: f64, median_stars: usi
     selected
 }
 
-fn select_best_by_quality_image(images: &[ImageInfo], take_pct: f64, use_constellation: bool) -> HashSet<&str> {
-    let take_pct = take_pct.clamp(0.0, 1.0);
-    let total = images.len();
-    let count_to_take = ((total as f64 * take_pct).ceil() as usize)
-        .max(1)
-        .min(total);
+fn select_best_by_quality(images: &[ImageInfo], take_quality: f64, use_constellation: bool) -> HashSet<&str> {
+    let take_quality = take_quality.clamp(0.0, 1.0);
 
     let mut eligible: Vec<&ImageInfo> = if use_constellation {
         images.iter().filter(|i| i.constellation_found == Some(true)).collect()
@@ -377,13 +373,13 @@ fn select_best_by_quality_image(images: &[ImageInfo], take_pct: f64, use_constel
     });
 
     let selected: HashSet<&str> = eligible.iter()
-        .take(count_to_take)
+        .filter(|e|e.quality > take_quality)
         .map(|i| i.file_name.as_str())
         .collect();
 
     println!(
         "Quality-image selection: {}/{} eligible, copying top {} by quality_image.",
-        eligible.len(), total, selected.len()
+        eligible.len(), images.len(), selected.len()
     );
 
     selected
@@ -445,19 +441,19 @@ fn process_directory(dir: &Path, args: &Args, registered_stars: Option<&Vec<Regi
         let (median_stars, low_star_threshold) = threshold_info.unwrap();
         let pct_int = (take_pct * 100.0).round() as u32;
         let folder_name = format!("selected_percent_{}", pct_int);
-        let selected = select_best_by_quality(&images, take_pct, median_stars, low_star_threshold, use_constellation);
+        let selected = select_best_by_percent(&images, take_pct, median_stars, low_star_threshold, use_constellation);
         copy_to_named_folder(dir, &images, &selected, &folder_name);
         all_selected.extend(selected);
     }
 
-    if let Some(take_quality_pct) = args.take_quality {
+    if let Some(take_quality) = args.take_quality {
         if images.is_empty() {
             eprintln!("No images loaded.");
             return;
         }
-        let pct_int = (take_quality_pct * 100.0).round() as u32;
+        let pct_int = (take_quality * 100.0).round() as u32;
         let folder_name = format!("selected_quality_{}", pct_int);
-        let selected = select_best_by_quality_image(&images, take_quality_pct, use_constellation);
+        let selected = select_best_by_quality(&images, take_quality, use_constellation);
         copy_to_named_folder(dir, &images, &selected, &folder_name);
         all_selected.extend(selected);
     }
