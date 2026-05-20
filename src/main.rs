@@ -134,9 +134,37 @@ fn load_images(entries: Vec<fs::DirEntry>, crop: Option<f64>, min_photons_qualit
     images
 }
 
+fn percentile(sorted: &[f64], p: usize) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() - 1) as f64 * p as f64 / 100.0).round() as usize;
+    sorted[idx]
+}
+
 fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Option<usize>) {
     let map_path = dir.join("quality_map.txt");
     let mut map_file = fs::File::create(&map_path).expect("Failed to create quality_map.txt");
+
+    let mut quality_vals: Vec<f64> = images.iter().map(|i| i.quality).collect();
+    quality_vals.sort_by(|a, b| a.total_cmp(b));
+    let mut quality_image_vals: Vec<f64> = images.iter()
+        .filter_map(|i| i.quality_image)
+        .collect();
+    quality_image_vals.sort_by(|a, b| a.total_cmp(b));
+
+    writeln!(map_file, "# Percentiles").expect("Failed to write");
+    writeln!(map_file, "# pct\tquality\tquality_image").expect("Failed to write");
+    for p in (0..=100).step_by(10) {
+        let q = percentile(&quality_vals, p);
+        let qi = if quality_image_vals.is_empty() {
+            String::new()
+        } else {
+            format!("{:.6}", percentile(&quality_image_vals, p))
+        };
+        writeln!(map_file, "# {:>3}%\t{:.6}\t{}", p, q, qi).expect("Failed to write percentile");
+    }
+    writeln!(map_file, "#").expect("Failed to write");
     writeln!(map_file, "filename\tquality\tquality_image\tstars\tnote").expect("Failed to write header");
 
     let mut sorted: Vec<&ImageInfo> = images.iter().collect();
