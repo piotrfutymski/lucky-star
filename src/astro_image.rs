@@ -26,6 +26,7 @@ pub struct AstroImage {
     detected_stars: Vec<Star>,
     data: Array<i16, IxDyn>,
     quality: f64,
+    quality_image: Option<f64>,
     quality_star_indices: Option<Vec<usize>>,
 }
 
@@ -65,6 +66,7 @@ impl AstroImage {
             detected_stars: vec![],
             data: Array::zeros(IxDyn(&[0, 0])),
             quality: 0.0,
+            quality_image: None,
             psf_size: 0,
             quality_star_indices: None,
         };
@@ -255,6 +257,10 @@ impl AstroImage {
         self.quality
     }
 
+    pub fn quality_image(&self) -> Option<f64> {
+        self.quality_image
+    }
+
     pub fn star_count(&self) -> usize {
         self.detected_stars.len()
     }
@@ -283,6 +289,7 @@ impl AstroImage {
             }
         }
         if mag_sum > 0.0 {
+            self.quality_image = Some(self.quality);
             self.quality = quality_sum / mag_sum;
         }
         self.quality_star_indices = Some(used_indices);
@@ -324,6 +331,9 @@ impl AstroImage {
         if let Some(ref qi) = self.quality_star_indices {
             writeln!(f, "├─────────────────────────────────────────┤")?;
             writeln!(f, "│  Quality from : {:>4} constellation star │", qi.len())?;
+        }
+        if let Some(qi) = self.quality_image {
+            writeln!(f, "│  Quality (img): {:>8.2} %              │", qi * 100.0)?;
         }
         writeln!(f, "│  QUALITY      : {:>8.2} %              │", self.quality * 100.0)?;
         writeln!(f, "└─────────────────────────────────────────┘")?;

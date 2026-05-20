@@ -52,6 +52,7 @@ struct ImageInfo {
     file_name: String,
     file_path: PathBuf,
     quality: f64,
+    quality_image: Option<f64>,
     star_count: usize,
     constellation_found: Option<bool>,
 }
@@ -120,6 +121,7 @@ fn load_images(entries: Vec<fs::DirEntry>, crop: Option<f64>, min_photons_qualit
                 print!("{}", img.brief_summary());
                 images.push(ImageInfo {
                     quality: img.quality(),
+                    quality_image: img.quality_image(),
                     star_count: img.star_count(),
                     file_name,
                     file_path,
@@ -135,7 +137,7 @@ fn load_images(entries: Vec<fs::DirEntry>, crop: Option<f64>, min_photons_qualit
 fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Option<usize>) {
     let map_path = dir.join("quality_map.txt");
     let mut map_file = fs::File::create(&map_path).expect("Failed to create quality_map.txt");
-    writeln!(map_file, "filename\tquality\tstars\tnote").expect("Failed to write header");
+    writeln!(map_file, "filename\tquality\tquality_image\tstars\tnote").expect("Failed to write header");
 
     let mut sorted: Vec<&ImageInfo> = images.iter().collect();
     sorted.sort_by(|a, b| b.quality.total_cmp(&a.quality));
@@ -148,7 +150,10 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
                 _ => "",
             }
         };
-        writeln!(map_file, "{}\t{:.6}\t{}\t{}", img.file_name, img.quality, img.star_count, note)
+        let quality_image_str = img.quality_image
+            .map(|q| format!("{:.6}", q))
+            .unwrap_or_default();
+        writeln!(map_file, "{}\t{:.6}\t{}\t{}\t{}", img.file_name, img.quality, quality_image_str, img.star_count, note)
             .expect("Failed to write quality map");
     }
     println!("\nQuality map written to: {}", map_path.display());
@@ -174,6 +179,22 @@ fn select_best_images(images: &[ImageInfo], take_pct: f64, median_stars: usize, 
     } else {
         images.iter().filter(|i| i.star_count >= low_star_threshold).collect()
     };
+
+    let rejected_by_img_quality = if take_pct <= 80.0 {
+        let reject_count = (eligible.len() as f64 * 0.2).floor() as usize;
+        if reject_count > 0 {
+            eligible.sort_by(|a, b| {
+                let qa = a.quality_image.unwrap_or(a.quality);
+                let qb = b.quality_image.unwrap_or(b.quality);
+                qa.total_cmp(&qb)
+            });
+            eligible.drain(..reject_count);
+        }
+        reject_count
+    } else {
+        0
+    };
+
     eligible.sort_by(|a, b| b.quality.total_cmp(&a.quality));
 
     let selected: HashSet<&str> = eligible.iter()
@@ -181,14 +202,17 @@ fn select_best_images(images: &[ImageInfo], take_pct: f64, median_stars: usize, 
         .map(|i| i.file_name.as_str())
         .collect();
 
+    if rejected_by_img_quality > 0 {
+        println!("\nPre-filter: rejected {} images (bottom 20% by image quality).", rejected_by_img_quality);
+    }
     if use_constellation {
         println!(
-            "\nSelection: {}/{} with constellation found, copying top {} by quality.",
+            "Selection: {}/{} with constellation found, copying top {} by quality.",
             eligible.len(), total, selected.len()
         );
     } else {
         println!(
-            "\nSelection: {}/{} eligible (median {} stars, min threshold {}), copying top {} by quality.",
+            "Selection: {}/{} eligible (median {} stars, min threshold {}), copying top {} by quality.",
             eligible.len(), total, median_stars, low_star_threshold, selected.len()
         );
     }
