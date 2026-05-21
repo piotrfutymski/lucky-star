@@ -82,7 +82,7 @@ struct Args {
     path: String,
 
     /// Copy the top N best images to a 'selected' subfolder (folder mode only)
-    #[arg(long, value_name = "FRACTION")]
+    #[arg(long, short, value_name = "FRACTION")]
     take: Option<f64>,
 
     /// Copy the top N best images based on quality_image score to a named subfolder (folder mode only)
@@ -90,20 +90,20 @@ struct Args {
     take_quality: Option<f64>,
 
     /// Move non-selected images to a 'remove' subfolder instead of deleting them (folder mode only)
-    #[arg(long)]
+    #[arg(long, short)]
     remove: bool,
 
     /// Only search for stars in the central fraction of the image (e.g. 0.3 = central 30% width and height)
     #[arg(long, value_name = "FRACTION")]
     crop: Option<f64>,
 
-    /// Save annotated star image to a JPG file (single file mode only)
+    /// Save annotated star image to a JPG file
     #[arg(long, short)]
     save_stars: bool,
 
     /// Path to a JSON file with reference stars for constellation-based quality filtering
     #[arg(long, value_name = "FILE")]
-    star_pattern: Option<String>
+    star_pattern: Option<String>,
 }
 
 struct ImageInfo {
@@ -113,6 +113,8 @@ struct ImageInfo {
     quality_image: Option<f64>,
     star_count: usize,
     constellation_found: Option<bool>,
+    brightest_star_photons: f64,
+    star5_photons: f64,
 }
 
 
@@ -208,6 +210,9 @@ fn load_images(entries: Vec<fs::DirEntry>, crop: Option<f64>, config: &AppConfig
                 };
                 pb.set_message(msg);
                 pb.inc(1);
+                let stars = img.stars();
+                let brightest_star_photons = stars.first().map_or(0.0, |s| s.magnitude);
+                let star5_photons = stars.get(4).map_or(0.0, |s| s.magnitude);
                 images.push(ImageInfo {
                     quality: img.quality(),
                     quality_image: img.quality_image(),
@@ -215,6 +220,8 @@ fn load_images(entries: Vec<fs::DirEntry>, crop: Option<f64>, config: &AppConfig
                     file_name,
                     file_path,
                     constellation_found,
+                    brightest_star_photons,
+                    star5_photons,
                 });
             }
             Err(e) => {
@@ -247,21 +254,34 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
     quality_image_vals.sort_by(|a, b| a.total_cmp(b));
 
     writeln!(map_file, "# Percentiles").expect("Failed to write");
-    writeln!(map_file, "# pct\tquality\tquality_image").expect("Failed to write");
+    writeln!(map_file, "# {:>4}  {:>9}  {:>9}", "pct", "quality", "qual_img").expect("Failed to write");
     for p in (0..=100).step_by(10) {
         let q = percentile(&quality_vals, p);
         let qi = if quality_image_vals.is_empty() {
-            String::new()
+            String::from("         -")
         } else {
-            format!("{:.6}", percentile(&quality_image_vals, p))
+            format!("{:>9.4}%", percentile(&quality_image_vals, p) * 100.0)
         };
         if p == 50 {
             println!("MEDIAN QUALITY FOR SEQUENCE: {:.4} %", q * 100.0)
         }
-        writeln!(map_file, "# {:>3}%\t{:.6}\t{}", p, q, qi).expect("Failed to write percentile");
+        writeln!(map_file, "# {:>3}%  {:>9.4}%  {}", p, q * 100.0, qi).expect("Failed to write percentile");
     }
     writeln!(map_file, "#").expect("Failed to write");
-    writeln!(map_file, "filename\tquality\tquality_image\tstars\tnote").expect("Failed to write header");
+
+    let fn_width = images.iter().map(|i| i.file_name.len()).max().unwrap_or(8).max(8);
+    writeln!(
+        map_file,
+        "{:<fn_width$}  {:>9}  {:>9}  {:>6}  {:>12}  {:>10}  {}",
+        "filename", "quality", "qual_img", "stars", "brightest", "star5", "note",
+        fn_width = fn_width
+    ).expect("Failed to write header");
+    writeln!(
+        map_file,
+        "{:-<fn_width$}  {:->9}  {:->9}  {:->6}  {:->12}  {:->10}  {:->4}",
+        "", "", "", "", "", "", "",
+        fn_width = fn_width
+    ).expect("Failed to write separator");
 
     let mut sorted: Vec<&ImageInfo> = images.iter().collect();
     sorted.sort_by(|a, b| b.quality.total_cmp(&a.quality));
@@ -275,12 +295,24 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
             }
         };
         let quality_image_str = img.quality_image
-            .map(|q| format!("{:.6}", q))
-            .unwrap_or_default();
+            .map(|q| format!("{:>9.4}%", q * 100.0))
+            .unwrap_or_else(|| format!("{:>9}", "-"));
+        let brightest = if img.brightest_star_photons > 0.0 {
+            format!("{:>12.0}", img.brightest_star_photons)
+        } else {
+            format!("{:>12}", "0")
+        };
+        let star5 = if img.star5_photons > 0.0 {
+            format!("{:>10.0}", img.star5_photons)
+        } else {
+            format!("{:>10}", "0")
+        };
         writeln!(
             map_file,
-            "{}\t{:.6}\t{}\t{}\t{}",
-            img.file_name, img.quality, quality_image_str, img.star_count, note
+            "{:<fn_width$}  {:>9.4}%  {}  {:>6}  {}  {}  {}",
+            img.file_name, img.quality * 100.0, quality_image_str,
+            img.star_count, brightest, star5, note,
+            fn_width = fn_width
         )
         .expect("Failed to write quality map");
     }
@@ -293,7 +325,7 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
 
         writeln!(map_file, "\n# Trend (rolling average, window = {})", window)
             .expect("Failed to write trend header");
-        writeln!(map_file, "# images\tquality\tquality_image")
+        writeln!(map_file, "# images          quality   qual_img")
             .expect("Failed to write trend header");
 
         let mut start = 0;
@@ -303,11 +335,11 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
             let avg_q = slice.iter().map(|i| i.quality).sum::<f64>() / slice.len() as f64;
             let qi_vals: Vec<f64> = slice.iter().filter_map(|i| i.quality_image).collect();
             let avg_qi_str = if qi_vals.is_empty() {
-                String::new()
+                format!("{:>9}", "-")
             } else {
-                format!("{:.6}", qi_vals.iter().sum::<f64>() / qi_vals.len() as f64)
+                format!("{:>9.4}%", qi_vals.iter().sum::<f64>() / qi_vals.len() as f64 * 100.0)
             };
-            writeln!(map_file, "# {}-{}\t{:.6}\t{}", start + 1, end, avg_q, avg_qi_str)
+            writeln!(map_file, "# {}-{}  {:>9.4}%  {}", start + 1, end, avg_q * 100.0, avg_qi_str)
                 .expect("Failed to write trend row");
             start += window;
         }
@@ -501,7 +533,14 @@ fn main() {
     if path.is_file() {
         process_single_file(path, args.crop, args.save_stars, &config, registered_stars.as_ref());
     } else if path.is_dir() {
-        process_directory(path, &args, registered_stars.as_ref(), &config);
+        if args.save_stars {
+            let entries = collect_fits_files(path);
+            for entry in entries {
+                process_single_file(&entry.path(), args.crop, true, &config, registered_stars.as_ref());
+            }
+        }else{
+            process_directory(path, &args, registered_stars.as_ref(), &config);
+        }
     } else {
         eprintln!("Error: path does not exist: {}", args.path);
         std::process::exit(1);
