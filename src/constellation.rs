@@ -125,8 +125,8 @@ impl Constellation{
     }
 
     fn find_in_image_with_magnitude(star: &RegisteredStar, image: &AstroImage) -> Vec<usize> {
-        let max_magnitude = star.magnitude * 1.5;
-        let min_magnitude = star.magnitude * 0.67;
+        let max_magnitude = star.magnitude * 1.7;
+        let min_magnitude = star.magnitude * 0.5;
         image.stars_with_magnitude_between(min_magnitude, max_magnitude)
     }
 
