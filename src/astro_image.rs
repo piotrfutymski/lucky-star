@@ -85,7 +85,11 @@ impl AstroImage {
                 quality_sum += s.magnitude * s.top_4_pixels_part;
                 mag_sum += s.magnitude;
             });
-        self.quality = quality_sum / mag_sum;
+        if mag_sum > 0.0{
+            self.quality = quality_sum / mag_sum;
+        }else {
+            self.quality = 0.0;
+        }
     }
 
     fn extract_global_image_metadata(&mut self, data: &Array<i16, IxDyn>) {
@@ -116,8 +120,9 @@ impl AstroImage {
         let mut potential_stars = HashMap::new();
         let (i_start, i_end, j_start, j_end) = if let Some(c) = crop {
             let c = c.clamp(0.0, 1.0);
-            let margin_w = ((self.width as f64 * (1.0 - c) / 2.0) as usize).max(psf_size);
-            let margin_h = ((self.height as f64 * (1.0 - c) / 2.0) as usize).max(psf_size);
+            let to_include = (self.width.max(self.height) as f64 * c) as i32;
+            let margin_w = (((self.width as i32 - to_include) / 2)).max(psf_size as i32) as usize;
+            let margin_h = (((self.height as i32 - to_include) / 2)).max(psf_size as i32) as usize;
             let i_end = (self.width as usize - margin_w).min(self.width as usize - psf_size);
             let j_end = (self.height as usize - margin_h).min(self.height as usize - psf_size);
             (margin_w, i_end, margin_h, j_end)

@@ -8,9 +8,9 @@
 		"15000": 250.0,
 		"0": 250.0
 	},
-	"min_photons_to_detect_star": 150,
-	"min_central_photons_to_detect_star": 12,
+	"min_photons_to_detect_star": 300,
+	"min_central_photons_to_detect_star": 30,
 	"psf_size": 13,
-	"min_photons_quality": 200.0,
+	"min_photons_quality": 300.0,
 	"rolling_avg_window": 100
 }

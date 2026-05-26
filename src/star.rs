@@ -14,8 +14,28 @@ pub struct Star {
 impl Star {
 
 
-    pub fn new(pos: Vector2D<usize>, data: &Array<i16, IxDyn>, adu_e: f64, background_adu: u16, psf_size: usize) -> Star {
-        let brightest_pixel = (data[[pos.x, pos.y]].wrapping_sub(i16::MIN) as u16 - background_adu) as i32;
+    pub fn new(pos: Vector2D<usize>, data: &Array<i16, IxDyn>, adu_e: f64, background_adu_global: u16, psf_size: usize) -> Star {
+        let mut background_adu = 0.0;
+        let mut background_sum = 0;
+        for i in pos.x-psf_size..=pos.x+psf_size {
+            for j in pos.y-psf_size..=pos.y+psf_size {
+                if (i as i32 - pos.x as i32).abs()  < (psf_size / 2) as i32 || (j as i32 - pos.y as i32).abs()  < (psf_size / 2) as i32{
+                    continue;
+                }
+                if let Some(pixel) = data.get([i,j]){
+                    let v = pixel.wrapping_sub(i16::MIN) as f64;
+                    if v < background_adu_global as f64 * 1.5 {
+                        background_adu += v;
+                        background_sum += 1;
+                    }
+                }
+            }
+        }
+        background_adu = background_adu / background_sum as f64;
+        if background_adu == 0.0{
+            background_adu = background_adu_global as f64;
+        }
+        let brightest_pixel = (data[[pos.x, pos.y]].wrapping_sub(i16::MIN) as u16 - background_adu as u16) as i32;
         let mut brightest_pixels = [0, 0, 0, 0];
         let mut magnitude = 0.0;
         for i in pos.x-psf_size/2..=pos.x+psf_size/2 {

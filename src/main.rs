@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
+use rand::seq::SliceRandom;
 use serde::Deserialize;
 use crate::astro_image::AstroImage;
 use crate::constellation::{Constellation, RegisteredStar, load_stars_from_json};
@@ -36,10 +37,10 @@ impl Default for AppConfig {
         gain_to_adu.insert(0, 250.0);
         AppConfig {
             gain_to_adu,
-            min_photons_to_detect_star: 150,
-            min_central_photons_to_detect_star: 12,
+            min_photons_to_detect_star: 300,
+            min_central_photons_to_detect_star: 30,
             psf_size: 13,
-            min_photons_quality: 200.0,
+            min_photons_quality: 450.0,
             rolling_avg_window: 100,
         }
     }
@@ -104,6 +105,14 @@ struct Args {
     /// Path to a JSON file with reference stars for constellation-based quality filtering
     #[arg(long, value_name = "FILE")]
     star_pattern: Option<String>,
+
+    /// Keep images with low stars
+    #[arg(long, short)]
+    keep_low: bool,
+
+    /// Check seeing (to implement)
+    #[arg(long, short)]
+    check_seeing: bool,
 }
 
 struct ImageInfo {
@@ -168,7 +177,7 @@ fn collect_fits_files(dir: &Path) -> Vec<fs::DirEntry> {
     entries
 }
 
-fn load_images(entries: Vec<fs::DirEntry>, crop: Option<f64>, config: &AppConfig, registered_stars: Option<&Vec<RegisteredStar>>) -> Vec<ImageInfo> {
+fn load_images(entries: &[fs::DirEntry], crop: Option<f64>, config: &AppConfig, registered_stars: Option<&Vec<RegisteredStar>>) -> Vec<ImageInfo> {
     let total = entries.len() as u64;
     let pb = ProgressBar::new(total);
     pb.set_style(
@@ -255,7 +264,7 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
 
     writeln!(map_file, "# Percentiles").expect("Failed to write");
     writeln!(map_file, "# {:>4}  {:>9}  {:>9}", "pct", "quality", "qual_img").expect("Failed to write");
-    for p in (0..=100).step_by(10) {
+    for p in (0..=100).step_by(20) {
         let q = percentile(&quality_vals, p);
         let qi = if quality_image_vals.is_empty() {
             String::from("         -")
@@ -267,6 +276,36 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
         }
         writeln!(map_file, "# {:>3}%  {:>9.4}%  {}", p, q * 100.0, qi).expect("Failed to write percentile");
     }
+    writeln!(map_file, "#").expect("Failed to write");
+
+    // Trend section: rolling averages sorted by filename (chronological proxy)
+    let window = config.rolling_avg_window;
+    if window > 0 && images.len() > window {
+        let mut by_filename: Vec<&ImageInfo> = images.iter().collect();
+        by_filename.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+
+        writeln!(map_file, "\n# Trend (rolling average, window = {})", window)
+            .expect("Failed to write trend header");
+        writeln!(map_file, "# images          quality   qual_img")
+            .expect("Failed to write trend header");
+
+        let mut start = 0;
+        while start < by_filename.len() {
+            let end = (start + window).min(by_filename.len());
+            let slice = &by_filename[start..end];
+            let avg_q = slice.iter().map(|i| i.quality).sum::<f64>() / slice.len() as f64;
+            let qi_vals: Vec<f64> = slice.iter().filter_map(|i| i.quality_image).collect();
+            let avg_qi_str = if qi_vals.is_empty() {
+                format!("{:>9}", "-")
+            } else {
+                format!("{:>9.4}%", qi_vals.iter().sum::<f64>() / qi_vals.len() as f64 * 100.0)
+            };
+            writeln!(map_file, "# {}-{}  {:>9.4}%  {}", start + 1, end, avg_q * 100.0, avg_qi_str)
+                .expect("Failed to write trend row");
+            start += window;
+        }
+    }
+
     writeln!(map_file, "#").expect("Failed to write");
 
     let fn_width = images.iter().map(|i| i.file_name.len()).max().unwrap_or(8).max(8);
@@ -316,35 +355,6 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
         )
         .expect("Failed to write quality map");
     }
-
-    // Trend section: rolling averages sorted by filename (chronological proxy)
-    let window = config.rolling_avg_window;
-    if window > 0 && images.len() > window {
-        let mut by_filename: Vec<&ImageInfo> = images.iter().collect();
-        by_filename.sort_by(|a, b| a.file_name.cmp(&b.file_name));
-
-        writeln!(map_file, "\n# Trend (rolling average, window = {})", window)
-            .expect("Failed to write trend header");
-        writeln!(map_file, "# images          quality   qual_img")
-            .expect("Failed to write trend header");
-
-        let mut start = 0;
-        while start < by_filename.len() {
-            let end = (start + window).min(by_filename.len());
-            let slice = &by_filename[start..end];
-            let avg_q = slice.iter().map(|i| i.quality).sum::<f64>() / slice.len() as f64;
-            let qi_vals: Vec<f64> = slice.iter().filter_map(|i| i.quality_image).collect();
-            let avg_qi_str = if qi_vals.is_empty() {
-                format!("{:>9}", "-")
-            } else {
-                format!("{:>9.4}%", qi_vals.iter().sum::<f64>() / qi_vals.len() as f64 * 100.0)
-            };
-            writeln!(map_file, "# {}-{}  {:>9.4}%  {}", start + 1, end, avg_q * 100.0, avg_qi_str)
-                .expect("Failed to write trend row");
-            start += window;
-        }
-    }
-
     println!("\nQuality map written to: {}", map_path.display());
 }
 
@@ -355,14 +365,16 @@ fn compute_star_threshold(images: &[ImageInfo]) -> (usize, usize) {
     let threshold = (median as f64 * 0.7) as usize;
     (median, threshold)
 }
-fn select_best_by_percent(images: &[ImageInfo], take_pct: f64, median_stars: usize, low_star_threshold: usize, use_constellation: bool) -> HashSet<&str> {
+fn select_best_by_percent(images: &[ImageInfo], take_pct: f64, median_stars: usize, low_star_threshold: usize, use_constellation: bool, keep_low: bool) -> HashSet<&str> {
     let take_pct = take_pct.clamp(0.0, 1.0);
     let total = images.len();
     let count_to_take = ((total as f64 * take_pct).ceil() as usize)
         .max(1)
         .min(total);
 
-    let mut eligible: Vec<&ImageInfo> = if use_constellation {
+    let mut eligible: Vec<&ImageInfo> = if keep_low {
+        images.iter().map(|i| i).collect()
+    } else if use_constellation {
         images.iter().filter(|i| i.constellation_found == Some(true)).collect()
     } else {
         images.iter().filter(|i| i.star_count >= low_star_threshold).collect()
@@ -457,7 +469,7 @@ fn remove_original_images(dir: &Path, images: &[ImageInfo], selected: &HashSet<&
 
 fn process_directory(dir: &Path, args: &Args, registered_stars: Option<&Vec<RegisteredStar>>, config: &AppConfig) {
     let entries = collect_fits_files(dir);
-    let images = load_images(entries, args.crop, config, registered_stars);
+    let images = load_images(&entries, args.crop, config, registered_stars);
 
     let threshold_info = if !images.is_empty() { Some(compute_star_threshold(&images)) } else { None };
     write_quality_map(dir, &images, threshold_info.map(|t| t.1), config);
@@ -473,7 +485,7 @@ fn process_directory(dir: &Path, args: &Args, registered_stars: Option<&Vec<Regi
         let (median_stars, low_star_threshold) = threshold_info.unwrap();
         let pct_int = (take_pct * 100.0).round() as u32;
         let folder_name = format!("selected_percent_{}", pct_int);
-        let selected = select_best_by_percent(&images, take_pct, median_stars, low_star_threshold, use_constellation);
+        let selected = select_best_by_percent(&images, take_pct, median_stars, low_star_threshold, use_constellation, args.keep_low);
         copy_to_named_folder(dir, &images, &selected, &folder_name);
         all_selected.extend(selected);
     }
@@ -497,6 +509,42 @@ fn process_directory(dir: &Path, args: &Args, registered_stars: Option<&Vec<Regi
             remove_original_images(dir, &images, &all_selected);
         }
     }
+}
+
+fn check_seeing(args: &Args, registered_stars: &Option<Vec<RegisteredStar>>, config: &AppConfig, path: &Path) {
+    let entries = collect_fits_files(path);
+    let total = entries.len();
+    if total == 0 {
+        eprintln!("No FITS files found in directory for seeing check.");
+        std::process::exit(1);
+    }
+    let mut rng = rand::rng();
+    let sample_size = total.min(100);
+    let mut sampled_entries = entries;
+    sampled_entries.shuffle(&mut rng);
+    let sampled_entries = &sampled_entries[..sample_size];
+    let images = load_images(sampled_entries, args.crop, &config, registered_stars.as_ref());
+    if images.is_empty() {
+        eprintln!("No images loaded for seeing check.");
+        std::process::exit(1);
+    }
+    let mut qualities: Vec<f64> = images.iter().map(|i| i.quality).collect();
+    qualities.sort_by(|a, b| a.total_cmp(b));
+    let mean = qualities.iter().sum::<f64>() / qualities.len() as f64;
+    let stddev = if qualities.len() > 1 {
+        let mean = mean;
+        (qualities.iter().map(|q| (q - mean).powi(2)).sum::<f64>() / (qualities.len() as f64 - 1.0)).sqrt()
+    } else { 0.0 };
+    let median = percentile(&qualities, 50);
+    let pct25 = percentile(&qualities, 25);
+    let pct75 = percentile(&qualities, 75);
+    println!("\n--- SEEING METRICS ({} images) ---", qualities.len());
+    println!("Median QUALITY (seeing): {:.4}%", median * 100.0);
+    println!("Mean QUALITY: {:.4}%", mean * 100.0);
+    println!("Stddev QUALITY: {:.4}%", stddev * 100.0);
+    println!("25th percentile: {:.4}%", pct25 * 100.0);
+    println!("75th percentile: {:.4}%", pct75 * 100.0);
+    println!("-----------------------------------\n");
 }
 
 fn main() {
@@ -533,12 +581,14 @@ fn main() {
     if path.is_file() {
         process_single_file(path, args.crop, args.save_stars, &config, registered_stars.as_ref());
     } else if path.is_dir() {
-        if args.save_stars {
+        if args.check_seeing {
+            check_seeing(&args, &registered_stars, &config, path);
+        } else if args.save_stars {
             let entries = collect_fits_files(path);
             for entry in entries {
                 process_single_file(&entry.path(), args.crop, true, &config, registered_stars.as_ref());
             }
-        }else{
+        } else {
             process_directory(path, &args, registered_stars.as_ref(), &config);
         }
     } else {
@@ -546,3 +596,5 @@ fn main() {
         std::process::exit(1);
     }
 }
+
+
