@@ -275,6 +275,8 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
         .filter_map(|i| i.quality_image)
         .collect();
     quality_image_vals.sort_by(|a, b| a.total_cmp(b));
+    let mut fwhm_vals: Vec<f64> = images.iter().map(|i| i.fwhm).collect();
+    fwhm_vals.sort_by(|a, b| a.total_cmp(b));
 
     let fn_width = images.iter().map(|i| i.file_name.len()).max().unwrap_or(8).max(8);
     writeln!(
@@ -317,7 +319,7 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
         writeln!(
             map_file,
             "{:<fn_width$}  {:>9.4}  {:>9.4}%  {}  {:>6}  {}  {}  {}",
-            img.fwhm, img.file_name, img.quality * 100.0, quality_image_str,
+            img.file_name, img.fwhm, img.quality * 100.0, quality_image_str,
             img.star_count, brightest, star5, note,
             fn_width = fn_width
         )
@@ -325,7 +327,7 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
     }
 
     writeln!(map_file, "# Percentiles").expect("Failed to write");
-    writeln!(map_file, "# {:>4}  {:>9}  {:>9}", "pct", "quality", "qual_img").expect("Failed to write");
+    writeln!(map_file, "# {:>4}  {:>9}  {:>9}  {:>9}", "pct", "quality", "qual_img", "fwhm").expect("Failed to write");
     for p in (0..=100).step_by(5) {
         let q = percentile(&quality_vals, p);
         let qi = if quality_image_vals.is_empty() {
@@ -333,11 +335,12 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
         } else {
             format!("{:>9.4}%", percentile(&quality_image_vals, p) * 100.0)
         };
+        let fwhm_p = percentile(&fwhm_vals, p);
         if p == 50 {
+            println!("Median FWHM (SEEING): {:.4}", fwhm_from_quality(q));
             println!("MEDIAN QUALITY FOR SEQUENCE: {:.4} %", q * 100.0);
-            println!("MEDIAN FWHM FOR SEQUENCE: {:.4}", fwhm_from_quality(q))
         }
-        writeln!(map_file, "# {:>3}%  {:>9.4}%  {}", p, q * 100.0, qi).expect("Failed to write percentile");
+        writeln!(map_file, "# {:>3}%  {:>9.4}%  {}  {:>9.4}", p, q * 100.0, qi, fwhm_p).expect("Failed to write percentile");
     }
     writeln!(map_file, "#").expect("Failed to write");
 
@@ -349,7 +352,7 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
 
         writeln!(map_file, "\n# Trend (rolling average, window = {})", window)
             .expect("Failed to write trend header");
-        writeln!(map_file, "# images          quality   qual_img")
+        writeln!(map_file, "# images          quality   qual_img       fwhm")
             .expect("Failed to write trend header");
 
         let mut start = 0;
@@ -357,13 +360,14 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
             let end = (start + window).min(by_filename.len());
             let slice = &by_filename[start..end];
             let avg_q = slice.iter().map(|i| i.quality).sum::<f64>() / slice.len() as f64;
+            let avg_fwhm = slice.iter().map(|i| i.fwhm).sum::<f64>() / slice.len() as f64;
             let qi_vals: Vec<f64> = slice.iter().filter_map(|i| i.quality_image).collect();
             let avg_qi_str = if qi_vals.is_empty() {
                 format!("{:>9}", "-")
             } else {
                 format!("{:>9.4}%", qi_vals.iter().sum::<f64>() / qi_vals.len() as f64 * 100.0)
             };
-            writeln!(map_file, "# {}-{}  {:>9.4}%  {}", start + 1, end, avg_q * 100.0, avg_qi_str)
+            writeln!(map_file, "# {}-{}  {:>9.4}%  {}  {:>9.4}", start + 1, end, avg_q * 100.0, avg_qi_str, avg_fwhm)
                 .expect("Failed to write trend row");
             start += window;
         }
@@ -586,7 +590,7 @@ fn check_seeing(args: &Args, registered_stars: &Option<Vec<RegisteredStar>>, con
     let pct25 = percentile(&qualities, 25);
     let pct75 = percentile(&qualities, 75);
     println!("\n--- SEEING METRICS ({} images) ---", qualities.len());
-    println!("Mean FWHM (SEEING): {:.4}", fwhm_from_quality(mean));
+    println!("Median FWHM (SEEING): {:.4}", fwhm_from_quality(median));
     println!("FWHM VARY FROM: {:.4} - {:.4}", fwhm_from_quality(mean + stddev), fwhm_from_quality(mean - stddev));
     println!("Median QUALITY: {:.4}%", median * 100.0);
     println!("Mean QUALITY: {:.4}%", mean * 100.0);
