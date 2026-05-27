@@ -6,7 +6,7 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::seq::SliceRandom;
 use serde::Deserialize;
-use crate::astro_image::AstroImage;
+use crate::astro_image::{fwhm_from_quality, AstroImage};
 use crate::constellation::{Constellation, RegisteredStar, load_stars_from_json};
 use crate::helpers::median;
 
@@ -113,12 +113,17 @@ struct Args {
     /// Check seeing (to implement)
     #[arg(long, short)]
     check_seeing: bool,
+
+    /// Move all files into subdirectories named by their rounded quality percentage (folder mode only)
+    #[arg(long)]
+    divide: bool,
 }
 
 struct ImageInfo {
     file_name: String,
     file_path: PathBuf,
     quality: f64,
+    fwhm: f64,
     quality_image: Option<f64>,
     star_count: usize,
     constellation_found: Option<bool>,
@@ -190,7 +195,10 @@ fn load_images(entries: &[fs::DirEntry], crop: Option<f64>, config: &AppConfig, 
     let mut images = Vec::new();
     let mut quality_sum = 0.0f64;
     let mut quality_image_sum = 0.0f64;
+    let mut fwhm_sum = 0.0f64;
     let mut quality_image_count = 0usize;
+    let mut quality_count = 0usize;
+
 
     for entry in entries {
         let file_path = entry.path();
@@ -200,22 +208,27 @@ fn load_images(entries: &[fs::DirEntry], crop: Option<f64>, config: &AppConfig, 
                 let constellation_found = registered_stars.map(|stars| {
                     apply_constellation_quality(&mut img, stars, config, &file_name)
                 });
-                quality_sum += img.quality();
-                if let Some(qi) = img.quality_image() {
-                    quality_image_sum += qi;
-                    quality_image_count += 1;
+                if img.quality().is_finite(){
+                    quality_sum += img.quality();
+                    fwhm_sum += img.fwhm();
+                    quality_count += 1;
+                    if let Some(qi) = img.quality_image() {
+                        quality_image_sum += qi;
+                        quality_image_count += 1;
+                    }
                 }
-                let n = images.len() + 1;
-                let avg_q = quality_sum / n as f64;
+                let avg_q = quality_sum / quality_count as f64;
+                let avg_f = fwhm_sum / quality_count as f64;
                 let msg = if quality_image_count > 0 {
                     let avg_qi = quality_image_sum / quality_image_count as f64;
                     format!(
-                        "avg quality: {:.2}%  avg quality_image: {:.2}%",
+                        "avg FWHM: {:.2}  avg quality: {:.2}%  avg quality_image: {:.2}%",
+                        avg_f * 100.0,
                         avg_q * 100.0,
                         avg_qi * 100.0
                     )
                 } else {
-                    format!("avg quality: {:.2}%", avg_q * 100.0)
+                    format!("avg FWHM: {:.2}  avg quality: {:.2}%",avg_f, avg_q * 100.0)
                 };
                 pb.set_message(msg);
                 pb.inc(1);
@@ -223,6 +236,7 @@ fn load_images(entries: &[fs::DirEntry], crop: Option<f64>, config: &AppConfig, 
                 let brightest_star_photons = stars.first().map_or(0.0, |s| s.magnitude);
                 let star5_photons = stars.get(4).map_or(0.0, |s| s.magnitude);
                 images.push(ImageInfo {
+                    fwhm: img.fwhm(),
                     quality: img.quality(),
                     quality_image: img.quality_image(),
                     star_count: img.star_count(),
@@ -262,9 +276,57 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
         .collect();
     quality_image_vals.sort_by(|a, b| a.total_cmp(b));
 
+    let fn_width = images.iter().map(|i| i.file_name.len()).max().unwrap_or(8).max(8);
+    writeln!(
+        map_file,
+        "{:<fn_width$}  {:>9}  {:>9}  {:>9}  {:>6}  {:>12}  {:>10}  {}",
+        "filename","fwhm", "quality", "qual_img", "stars", "brightest", "star5", "note",
+        fn_width = fn_width
+    ).expect("Failed to write header");
+    writeln!(
+        map_file,
+        "{:-<fn_width$}  {:>9}  {:->9}  {:->9}  {:->6}  {:->12}  {:->10}  {:->4}",
+        "","", "", "", "", "", "", "",
+        fn_width = fn_width
+    ).expect("Failed to write separator");
+
+    let mut sorted: Vec<&ImageInfo> = images.iter().collect();
+    sorted.sort_by(|a, b| b.quality.total_cmp(&a.quality));
+    for img in &sorted {
+        let note = if img.constellation_found == Some(false) {
+            "no_constellation"
+        } else {
+            match low_star_threshold {
+                Some(t) if img.star_count < t => "low_stars",
+                _ => "",
+            }
+        };
+        let quality_image_str = img.quality_image
+            .map(|q| format!("{:>9.4}%", q * 100.0))
+            .unwrap_or_else(|| format!("{:>9}", "-"));
+        let brightest = if img.brightest_star_photons > 0.0 {
+            format!("{:>12.0}", img.brightest_star_photons)
+        } else {
+            format!("{:>12}", "0")
+        };
+        let star5 = if img.star5_photons > 0.0 {
+            format!("{:>10.0}", img.star5_photons)
+        } else {
+            format!("{:>10}", "0")
+        };
+        writeln!(
+            map_file,
+            "{:<fn_width$}  {:>9.4}  {:>9.4}%  {}  {:>6}  {}  {}  {}",
+            img.fwhm, img.file_name, img.quality * 100.0, quality_image_str,
+            img.star_count, brightest, star5, note,
+            fn_width = fn_width
+        )
+        .expect("Failed to write quality map");
+    }
+
     writeln!(map_file, "# Percentiles").expect("Failed to write");
     writeln!(map_file, "# {:>4}  {:>9}  {:>9}", "pct", "quality", "qual_img").expect("Failed to write");
-    for p in (0..=100).step_by(20) {
+    for p in (0..=100).step_by(5) {
         let q = percentile(&quality_vals, p);
         let qi = if quality_image_vals.is_empty() {
             String::from("         -")
@@ -272,7 +334,8 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
             format!("{:>9.4}%", percentile(&quality_image_vals, p) * 100.0)
         };
         if p == 50 {
-            println!("MEDIAN QUALITY FOR SEQUENCE: {:.4} %", q * 100.0)
+            println!("MEDIAN QUALITY FOR SEQUENCE: {:.4} %", q * 100.0);
+            println!("MEDIAN FWHM FOR SEQUENCE: {:.4}", fwhm_from_quality(q))
         }
         writeln!(map_file, "# {:>3}%  {:>9.4}%  {}", p, q * 100.0, qi).expect("Failed to write percentile");
     }
@@ -307,54 +370,6 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
     }
 
     writeln!(map_file, "#").expect("Failed to write");
-
-    let fn_width = images.iter().map(|i| i.file_name.len()).max().unwrap_or(8).max(8);
-    writeln!(
-        map_file,
-        "{:<fn_width$}  {:>9}  {:>9}  {:>6}  {:>12}  {:>10}  {}",
-        "filename", "quality", "qual_img", "stars", "brightest", "star5", "note",
-        fn_width = fn_width
-    ).expect("Failed to write header");
-    writeln!(
-        map_file,
-        "{:-<fn_width$}  {:->9}  {:->9}  {:->6}  {:->12}  {:->10}  {:->4}",
-        "", "", "", "", "", "", "",
-        fn_width = fn_width
-    ).expect("Failed to write separator");
-
-    let mut sorted: Vec<&ImageInfo> = images.iter().collect();
-    sorted.sort_by(|a, b| b.quality.total_cmp(&a.quality));
-    for img in &sorted {
-        let note = if img.constellation_found == Some(false) {
-            "no_constellation"
-        } else {
-            match low_star_threshold {
-                Some(t) if img.star_count < t => "low_stars",
-                _ => "",
-            }
-        };
-        let quality_image_str = img.quality_image
-            .map(|q| format!("{:>9.4}%", q * 100.0))
-            .unwrap_or_else(|| format!("{:>9}", "-"));
-        let brightest = if img.brightest_star_photons > 0.0 {
-            format!("{:>12.0}", img.brightest_star_photons)
-        } else {
-            format!("{:>12}", "0")
-        };
-        let star5 = if img.star5_photons > 0.0 {
-            format!("{:>10.0}", img.star5_photons)
-        } else {
-            format!("{:>10}", "0")
-        };
-        writeln!(
-            map_file,
-            "{:<fn_width$}  {:>9.4}%  {}  {:>6}  {}  {}  {}",
-            img.file_name, img.quality * 100.0, quality_image_str,
-            img.star_count, brightest, star5, note,
-            fn_width = fn_width
-        )
-        .expect("Failed to write quality map");
-    }
     println!("\nQuality map written to: {}", map_path.display());
 }
 
@@ -467,7 +482,35 @@ fn remove_original_images(dir: &Path, images: &[ImageInfo], selected: &HashSet<&
     println!("Moved {} non-selected images to: {}", moved, remove_dir.display());
 }
 
+fn divide_by_quality(dir: &Path, images: &[ImageInfo]) {
+    use std::collections::BTreeMap;
+    let mut bin_counts: BTreeMap<u32, usize> = BTreeMap::new();
+    for img in images {
+        let bin = (img.quality * 100.0).round() as u32;
+        let bin_dir = dir.join(bin.to_string());
+        fs::create_dir_all(&bin_dir).expect("Failed to create bin directory");
+        let dest = bin_dir.join(&img.file_name);
+        if let Err(_) = fs::rename(&img.file_path, &dest) {
+            // Cross-device fallback: copy then delete
+            fs::copy(&img.file_path, &dest)
+                .expect("Failed to copy file to bin directory");
+            fs::remove_file(&img.file_path)
+                .expect("Failed to remove original after copy");
+        }
+        *bin_counts.entry(bin).or_insert(0) += 1;
+    }
+    for (bin, count) in &bin_counts {
+        println!("  {}/  <- {} file(s)", bin, count);
+    }
+    println!("Divided {} files into {} bin(s).", images.len(), bin_counts.len());
+}
+
 fn process_directory(dir: &Path, args: &Args, registered_stars: Option<&Vec<RegisteredStar>>, config: &AppConfig) {
+    if args.divide && (args.take.is_some() || args.take_quality.is_some()) {
+        eprintln!("Error: --divide cannot be combined with --take or --take-quality.");
+        return;
+    }
+
     let entries = collect_fits_files(dir);
     let images = load_images(&entries, args.crop, config, registered_stars);
 
@@ -509,6 +552,10 @@ fn process_directory(dir: &Path, args: &Args, registered_stars: Option<&Vec<Regi
             remove_original_images(dir, &images, &all_selected);
         }
     }
+
+    if args.divide {
+        divide_by_quality(dir, &images);
+    }
 }
 
 fn check_seeing(args: &Args, registered_stars: &Option<Vec<RegisteredStar>>, config: &AppConfig, path: &Path) {
@@ -539,7 +586,9 @@ fn check_seeing(args: &Args, registered_stars: &Option<Vec<RegisteredStar>>, con
     let pct25 = percentile(&qualities, 25);
     let pct75 = percentile(&qualities, 75);
     println!("\n--- SEEING METRICS ({} images) ---", qualities.len());
-    println!("Median QUALITY (seeing): {:.4}%", median * 100.0);
+    println!("Mean FWHM (SEEING): {:.4}", fwhm_from_quality(mean));
+    println!("FWHM VARY FROM: {:.4} - {:.4}", fwhm_from_quality(mean + stddev), fwhm_from_quality(mean - stddev));
+    println!("Median QUALITY: {:.4}%", median * 100.0);
     println!("Mean QUALITY: {:.4}%", mean * 100.0);
     println!("Stddev QUALITY: {:.4}%", stddev * 100.0);
     println!("25th percentile: {:.4}%", pct25 * 100.0);

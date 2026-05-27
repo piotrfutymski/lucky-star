@@ -25,6 +25,7 @@ pub struct AstroImage {
     psf_size: usize,
     detected_stars: Vec<Star>,
     data: Array<i16, IxDyn>,
+    fwhm: f64,
     quality: f64,
     quality_image: Option<f64>,
     quality_star_indices: Option<Vec<usize>>,
@@ -69,6 +70,7 @@ impl AstroImage {
             quality_image: None,
             psf_size: 0,
             quality_star_indices: None,
+            fwhm: 0.0
         };
         Ok(res)
     }
@@ -87,6 +89,7 @@ impl AstroImage {
             });
         if mag_sum > 0.0{
             self.quality = quality_sum / mag_sum;
+            self.recalculate_fwhm();
         }else {
             self.quality = 0.0;
         }
@@ -202,9 +205,17 @@ impl AstroImage {
         stars.sort_by(|a, b| b.magnitude.partial_cmp(&a.magnitude).unwrap_or(Ordering::Equal));
         self.detected_stars = stars;
     }
+
+    fn recalculate_fwhm(&mut self) {
+        self.fwhm = fwhm_from_quality(self.quality)
+    }
 }
 
 // PUBLIC
+
+pub fn fwhm_from_quality(quality: f64) -> f64{
+    -11.06713 + 26.141212 * (quality * 100.0).powf(-0.186645)
+}
 
 
 impl AstroImage {
@@ -262,6 +273,10 @@ impl AstroImage {
         self.quality
     }
 
+    pub fn fwhm(&self) -> f64 {
+        self.fwhm
+    }
+
     pub fn quality_image(&self) -> Option<f64> {
         self.quality_image
     }
@@ -292,6 +307,7 @@ impl AstroImage {
         if mag_sum > 0.0 {
             self.quality_image = Some(self.quality);
             self.quality = quality_sum / mag_sum;
+            self.recalculate_fwhm();
         }
         self.quality_star_indices = Some(used_indices);
     }
@@ -337,6 +353,7 @@ impl AstroImage {
             writeln!(f, "│  Quality (img): {:>8.2} %              │", qi * 100.0)?;
         }
         writeln!(f, "│  QUALITY      : {:>8.2} %              │", self.quality * 100.0)?;
+        writeln!(f, "│  FWHM      : {:>8.2} %                 │", self.fwhm * 100.0)?;
         writeln!(f, "└─────────────────────────────────────────┘")?;
 
         let star_row = |f: &mut Formatter<'_>, i: usize, s: &Star| -> std::fmt::Result {
