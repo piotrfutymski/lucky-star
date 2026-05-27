@@ -276,7 +276,7 @@ fn write_quality_map(dir: &Path, images: &[ImageInfo], low_star_threshold: Optio
         .collect();
     quality_image_vals.sort_by(|a, b| a.total_cmp(b));
     let mut fwhm_vals: Vec<f64> = images.iter().map(|i| i.fwhm).collect();
-    fwhm_vals.sort_by(|a, b| a.total_cmp(b));
+    fwhm_vals.sort_by(|a, b| b.total_cmp(a));
 
     let fn_width = images.iter().map(|i| i.file_name.len()).max().unwrap_or(8).max(8);
     writeln!(
