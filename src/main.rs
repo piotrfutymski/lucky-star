@@ -16,7 +16,6 @@ pub mod helpers;
 pub mod constellation;
 
 
-#[derive(Deserialize)]
 pub struct AppConfig {
     gain_to_adu: HashMap<u32, f64>,
     min_photons_to_detect_star: i32,
@@ -24,6 +23,7 @@ pub struct AppConfig {
     psf_size: usize,
     min_photons_quality: f64,
     rolling_avg_window: usize,
+    log_quality_window_t: f64,
 }
 
 impl Default for AppConfig {
@@ -42,7 +42,56 @@ impl Default for AppConfig {
             psf_size: 13,
             min_photons_quality: 450.0,
             rolling_avg_window: 100,
+            log_quality_window_t: 300.0,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for AppConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct PartialAppConfig {
+            #[serde(default)]
+            gain_to_adu: Option<HashMap<u32, f64>>,
+            #[serde(default)]
+            min_photons_to_detect_star: Option<i32>,
+            #[serde(default)]
+            min_central_photons_to_detect_star: Option<i32>,
+            #[serde(default)]
+            psf_size: Option<usize>,
+            #[serde(default)]
+            min_photons_quality: Option<f64>,
+            #[serde(default)]
+            rolling_avg_window: Option<usize>,
+            #[serde(default)]
+            log_quality_window_t: Option<f64>,
+        }
+
+        let partial = PartialAppConfig::deserialize(deserializer)?;
+        let default = AppConfig::default();
+
+        Ok(AppConfig {
+            gain_to_adu: partial.gain_to_adu.unwrap_or(default.gain_to_adu),
+            min_photons_to_detect_star: partial
+                .min_photons_to_detect_star
+                .unwrap_or(default.min_photons_to_detect_star),
+            min_central_photons_to_detect_star: partial
+                .min_central_photons_to_detect_star
+                .unwrap_or(default.min_central_photons_to_detect_star),
+            psf_size: partial.psf_size.unwrap_or(default.psf_size),
+            min_photons_quality: partial
+                .min_photons_quality
+                .unwrap_or(default.min_photons_quality),
+            rolling_avg_window: partial
+                .rolling_avg_window
+                .unwrap_or(default.rolling_avg_window),
+            log_quality_window_t: partial
+                .log_quality_window_t
+                .unwrap_or(default.log_quality_window_t),
+        })
     }
 }
 
@@ -77,7 +126,6 @@ impl AppConfig {
 #[derive(Parser)]
 #[command(name = "lucky-star", about = "Astronomical image quality analyzer")]
 struct Args {
-    /// Path to a FITS file or a directory containing FITS files
     /// Path to a FITS file or a directory containing FITS files
     #[arg(default_value = ".")]
     path: String,
@@ -194,10 +242,13 @@ fn load_images(entries: &[fs::DirEntry], crop: Option<f64>, config: &AppConfig, 
 
     let mut images = Vec::new();
     let mut quality_sum = 0.0f64;
-    let mut quality_image_sum = 0.0f64;
     let mut fwhm_sum = 0.0f64;
-    let mut quality_image_count = 0usize;
     let mut quality_count = 0usize;
+
+    let mut last_images_window = vec![];
+    let mut images_in_window = 100;
+    let mut was_images_in_window_set = false;
+    let mut last_quality = 0.0;
 
 
     for entry in entries {
@@ -205,6 +256,10 @@ fn load_images(entries: &[fs::DirEntry], crop: Option<f64>, config: &AppConfig, 
         let file_name = entry.file_name().to_string_lossy().to_string();
         match AstroImage::load(&file_path, crop, config) {
             Ok(mut img) => {
+                if !was_images_in_window_set {
+                    images_in_window = (config.log_quality_window_t / img.exp_t()).ceil() as i32;
+                    was_images_in_window_set = true
+                }
                 let constellation_found = registered_stars.map(|stars| {
                     apply_constellation_quality(&mut img, stars, config, &file_name)
                 });
@@ -212,24 +267,16 @@ fn load_images(entries: &[fs::DirEntry], crop: Option<f64>, config: &AppConfig, 
                     quality_sum += img.quality();
                     fwhm_sum += img.fwhm();
                     quality_count += 1;
-                    if let Some(qi) = img.quality_image() {
-                        quality_image_sum += qi;
-                        quality_image_count += 1;
+                    last_images_window.push(img.quality());
+                    if last_images_window.len() > images_in_window as usize {
+                        last_images_window.remove(0);
                     }
+                    last_quality = last_images_window.iter().sum::<f64>() / last_images_window.len() as f64
                 }
                 let avg_q = quality_sum / quality_count as f64;
                 let avg_f = fwhm_sum / quality_count as f64;
-                let msg = if quality_image_count > 0 {
-                    let avg_qi = quality_image_sum / quality_image_count as f64;
-                    format!(
-                        "avg FWHM: {:.2}  avg quality: {:.2}%  avg quality_image: {:.2}%",
-                        avg_f * 100.0,
-                        avg_q * 100.0,
-                        avg_qi * 100.0
-                    )
-                } else {
-                    format!("avg FWHM: {:.2}  avg quality: {:.2}%",avg_f, avg_q * 100.0)
-                };
+                let last_time = last_images_window.len() as f64 * img.exp_t() / 60.0;
+                let msg = format!("avg FWHM: {:.2}  avg quality: {:.2}%, quality from last {:.1}min: {:.2}% ",avg_f, avg_q * 100.0, last_time, last_quality * 100.0);
                 pb.set_message(msg);
                 pb.inc(1);
                 let stars = img.stars();

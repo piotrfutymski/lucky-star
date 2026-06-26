@@ -273,6 +273,10 @@ impl AstroImage {
         self.quality
     }
 
+    pub fn exp_t(&self) -> f64 {
+        self.exp_t
+    }
+
     pub fn fwhm(&self) -> f64 {
         self.fwhm
     }
