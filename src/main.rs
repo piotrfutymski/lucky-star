@@ -4,7 +4,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use rand::seq::SliceRandom;
 use serde::Deserialize;
 use crate::astro_image::{fwhm_from_quality, AstroImage};
 use crate::constellation::{Constellation, RegisteredStar, load_stars_from_json};
@@ -158,9 +157,9 @@ struct Args {
     #[arg(long, short)]
     keep_low: bool,
 
-    /// Check seeing (to implement)
-    #[arg(long, short)]
-    check_seeing: bool,
+    /// Check seeing using the N most recently created FITS images
+    #[arg(long, short = 'c', value_name = "N")]
+    check_seeing: Option<usize>,
 
     /// Move all files into subdirectories named by their rounded quality percentage (folder mode only)
     #[arg(long)]
@@ -611,16 +610,30 @@ fn process_directory(dir: &Path, args: &Args, registered_stars: Option<&Vec<Regi
 
 fn check_seeing(args: &Args, registered_stars: &Option<Vec<RegisteredStar>>, config: &AppConfig, path: &Path) {
     let entries = collect_fits_files(path);
-    let total = entries.len();
-    if total == 0 {
+    if entries.is_empty() {
         eprintln!("No FITS files found in directory for seeing check.");
         std::process::exit(1);
     }
-    let mut rng = rand::rng();
-    let sample_size = total.min(100);
-    let mut sampled_entries = entries;
-    sampled_entries.shuffle(&mut rng);
-    let sampled_entries = &sampled_entries[..sample_size];
+
+    let sample_size = args.check_seeing.expect("seeing sample size is required");
+    if sample_size == 0 {
+        eprintln!("Seeing sample size must be greater than zero.");
+        std::process::exit(1);
+    }
+
+    // Use creation time so repeated calls such as `-c 3` analyze the latest
+    // batch of frames rather than an arbitrary subset of the directory.
+    let mut entries = entries;
+    entries.sort_by(|a, b| {
+        let a_created = a.metadata().and_then(|metadata| metadata.modified()).ok();
+        let b_created = b.metadata().and_then(|metadata| metadata.modified()).ok();
+        a_created
+            .cmp(&b_created)
+            .then_with(|| a.file_name().cmp(&b.file_name()))
+    });
+    let start = entries.len().saturating_sub(sample_size);
+    let sampled_entries = &entries[start..];
+
     let images = load_images(sampled_entries, args.crop, &config, registered_stars.as_ref());
     if images.is_empty() {
         eprintln!("No images loaded for seeing check.");
@@ -681,7 +694,7 @@ fn main() {
     if path.is_file() {
         process_single_file(path, args.crop, args.save_stars, &config, registered_stars.as_ref());
     } else if path.is_dir() {
-        if args.check_seeing {
+        if args.check_seeing.is_some() {
             check_seeing(&args, &registered_stars, &config, path);
         } else if args.save_stars {
             let entries = collect_fits_files(path);
