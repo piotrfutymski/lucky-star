@@ -1,3 +1,8 @@
+use crate::AppConfig;
+use crate::star::Star;
+use ndarray::{Array, Array1, IxDyn};
+use rand::RngExt;
+use rustronomy_fits::{Extension, Fits, Header};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -5,12 +10,7 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use ndarray::{Array, Array1, IxDyn};
-use rand::RngExt;
-use rustronomy_fits::{Extension, Fits, Header};
-use crate::star::Star;
 use vector2d::Vector2D;
-use crate::AppConfig;
 
 pub struct AstroImage {
     width: u32,
@@ -32,7 +32,11 @@ pub struct AstroImage {
 }
 
 impl AstroImage {
-    pub fn load(file: impl AsRef<Path>, crop: Option<f64>, config: &AppConfig) -> Result<AstroImage, Box<dyn Error>> {
+    pub fn load(
+        file: impl AsRef<Path>,
+        crop: Option<f64>,
+        config: &AppConfig,
+    ) -> Result<AstroImage, Box<dyn Error>> {
         let fits = Fits::open(file.as_ref())?;
 
         let error_msg = format!("Can not get data from fit file: {:?}", file.as_ref());
@@ -50,12 +54,18 @@ impl AstroImage {
         Ok(res)
     }
 
-    fn get_data_from_header(header: &Header, config: &AppConfig) -> Result<AstroImage, Box<dyn Error>> {
+    fn get_data_from_header(
+        header: &Header,
+        config: &AppConfig,
+    ) -> Result<AstroImage, Box<dyn Error>> {
         let width: u32 = header.get_value_as("NAXIS1")?;
         let height: u32 = header.get_value_as("NAXIS2")?;
         let exp_t: f64 = header.get_value_as("EXPOSURE").unwrap_or(0.0);
         let gain: u32 = header.get_value_as("GAIN").unwrap_or(0);
-        let adu_e: f64 = *config.gain_to_adu.get(&gain).expect(format!("No adu_e defined for gain {}", gain).as_str());
+        let adu_e: f64 = *config
+            .gain_to_adu
+            .get(&gain)
+            .expect(format!("No adu_e defined for gain {}", gain).as_str());
         let res = Self {
             width,
             height,
@@ -70,7 +80,7 @@ impl AstroImage {
             quality_image: None,
             psf_size: 0,
             quality_star_indices: None,
-            fwhm: 0.0
+            fwhm: 0.0,
         };
         Ok(res)
     }
@@ -82,15 +92,15 @@ impl AstroImage {
         let mut mag_sum = 0.0;
         self.detected_stars
             .iter()
-            .filter(|star| { star.magnitude > config.min_photons_quality })
+            .filter(|star| star.magnitude > config.min_photons_quality)
             .for_each(|s| {
                 quality_sum += s.magnitude * s.top_4_pixels_part;
                 mag_sum += s.magnitude;
             });
-        if mag_sum > 0.0{
+        if mag_sum > 0.0 {
             self.quality = quality_sum / mag_sum;
             self.recalculate_fwhm();
-        }else {
+        } else {
             self.quality = 0.0;
         }
     }
@@ -99,7 +109,12 @@ impl AstroImage {
         let sample_count: usize = 50000;
         let mut rng = rand::rng();
         let samples = (0..sample_count)
-            .map(|_| ((rng.random::<u32>() % self.width) as usize, (rng.random::<u32>() % self.height) as usize))
+            .map(|_| {
+                (
+                    (rng.random::<u32>() % self.width) as usize,
+                    (rng.random::<u32>() % self.height) as usize,
+                )
+            })
             .map(|idx| {
                 let data = (data[[idx.0, idx.1]].wrapping_sub(i16::MIN) as u16) as f32;
                 data
@@ -108,7 +123,11 @@ impl AstroImage {
 
         let mean = samples.mean().unwrap_or(0.);
         let sigma = samples.std(0.);
-        let samples_no_stars = samples.iter().filter(|s| **s < mean + 3.0 * sigma).map(|e| *e).collect::<Array1<f32>>();
+        let samples_no_stars = samples
+            .iter()
+            .filter(|s| **s < mean + 3.0 * sigma)
+            .map(|e| *e)
+            .collect::<Array1<f32>>();
         let background_value = samples_no_stars.mean().unwrap_or(0.0);
         let sigma = samples_no_stars.std(0.);
 
@@ -118,19 +137,25 @@ impl AstroImage {
 
     fn find_stars(&mut self, data: &Array<i16, IxDyn>, crop: Option<f64>, config: &AppConfig) {
         let psf_size = self.psf_size;
-        let min_v = self.background_level_adu + (self.adu_e * config.min_central_photons_to_detect_star as f64) as u16;
+        let min_v = self.background_level_adu
+            + (self.adu_e * config.min_central_photons_to_detect_star as f64) as u16;
         let max_v = 0.7 * u16::MAX as f64;
         let mut potential_stars = HashMap::new();
         let (i_start, i_end, j_start, j_end) = if let Some(c) = crop {
             let c = c.clamp(0.0, 1.0);
             let to_include = (self.width.max(self.height) as f64 * c) as i32;
-            let margin_w = (((self.width as i32 - to_include) / 2)).max(psf_size as i32) as usize;
-            let margin_h = (((self.height as i32 - to_include) / 2)).max(psf_size as i32) as usize;
+            let margin_w = ((self.width as i32 - to_include) / 2).max(psf_size as i32) as usize;
+            let margin_h = ((self.height as i32 - to_include) / 2).max(psf_size as i32) as usize;
             let i_end = (self.width as usize - margin_w).min(self.width as usize - psf_size);
             let j_end = (self.height as usize - margin_h).min(self.height as usize - psf_size);
             (margin_w, i_end, margin_h, j_end)
         } else {
-            (psf_size, self.width as usize - psf_size, psf_size, self.height as usize - psf_size)
+            (
+                psf_size,
+                self.width as usize - psf_size,
+                psf_size,
+                self.height as usize - psf_size,
+            )
         };
         for i in i_start..i_end {
             for j in j_start..j_end {
@@ -174,7 +199,10 @@ impl AstroImage {
                 if j <= i {
                     continue;
                 }
-                if (compare_pos.0 as i32 - pos.0 as i32).pow(2) + (compare_pos.1 as i32 - pos.1 as i32).pow(2) < (psf_size * psf_size) as i32 {
+                if (compare_pos.0 as i32 - pos.0 as i32).pow(2)
+                    + (compare_pos.1 as i32 - pos.1 as i32).pow(2)
+                    < (psf_size * psf_size) as i32
+                {
                     to_delete.insert(i);
                     to_delete.insert(j);
                     break;
@@ -188,8 +216,20 @@ impl AstroImage {
         }
         let mut stars = star_pos
             .iter()
-            .map(|&i| Star::new(Vector2D::new(i.0, i.1), data, self.adu_e, self.background_level_adu, psf_size))
-            .filter(|s| !s.ill_defined && s.magnitude > config.min_photons_to_detect_star as f64 && s.brightest_pixel_adu < max_v)
+            .map(|&i| {
+                Star::new(
+                    Vector2D::new(i.0, i.1),
+                    data,
+                    self.adu_e,
+                    self.background_level_adu,
+                    psf_size,
+                )
+            })
+            .filter(|s| {
+                !s.ill_defined
+                    && s.magnitude > config.min_photons_to_detect_star as f64
+                    && s.brightest_pixel_adu < max_v
+            })
             .collect::<Vec<_>>();
         if !stars.is_empty() {
             let mut top4_vals: Vec<f64> = stars.iter().map(|s| s.top_4_pixels_part).collect();
@@ -202,7 +242,11 @@ impl AstroImage {
             };
             stars.retain(|s| s.top_4_pixels_part >= median / 2.0);
         }
-        stars.sort_by(|a, b| b.magnitude.partial_cmp(&a.magnitude).unwrap_or(Ordering::Equal));
+        stars.sort_by(|a, b| {
+            b.magnitude
+                .partial_cmp(&a.magnitude)
+                .unwrap_or(Ordering::Equal)
+        });
         self.detected_stars = stars;
     }
 
@@ -213,10 +257,9 @@ impl AstroImage {
 
 // PUBLIC
 
-pub fn fwhm_from_quality(quality: f64) -> f64{
+pub fn fwhm_from_quality(quality: f64) -> f64 {
     -11.06713 + 26.141212 * (quality * 100.0).powf(-0.186645)
 }
-
 
 impl AstroImage {
     pub fn save_stars_jpg(&self, output_path: impl AsRef<Path>) -> Result<(), Box<dyn Error>> {
@@ -252,26 +295,40 @@ impl AstroImage {
     }
 
     pub fn save_stars_md(&self, output_path: impl AsRef<Path>) -> Result<(), Box<dyn Error>> {
-
         let mut file = fs::File::create(output_path.as_ref())?;
         writeln!(file, "# Detected Stars (by mag)\n")?;
-        writeln!(file, "| # | X | Y | Flux (e\u{207b}) | Flux (ADU) | Brt px (ADU) | Brt px frac | Top-4 frac |")?;
-        writeln!(file, "|---|---|---|----------:|----------:|-------------:|------------:|-----------:|")?;
+        writeln!(
+            file,
+            "| # | X | Y | Flux (e\u{207b}) | Flux (ADU) | Brt px (ADU) | Brt px frac | Top-4 frac |"
+        )?;
+        writeln!(
+            file,
+            "|---|---|---|----------:|----------:|-------------:|------------:|-----------:|"
+        )?;
         for (i, s) in self.detected_stars.iter().enumerate() {
             writeln!(
                 file,
                 "| {} | {} | {} | {:.0} | {:.0} | {:.0} | {:.4} | {:.4} |",
-                i + 1, s.pos.x, s.pos.y,
-                s.magnitude, s.magnitude_adu, s.brightest_pixel_adu,
-                s.brightest_pixel_part, s.top_4_pixels_part
+                i + 1,
+                s.pos.x,
+                s.pos.y,
+                s.magnitude,
+                s.magnitude_adu,
+                s.brightest_pixel_adu,
+                s.brightest_pixel_part,
+                s.top_4_pixels_part
             )?;
         }
         Ok(())
     }
 
-    pub fn width(&self) -> usize { self.width as usize }
+    pub fn width(&self) -> usize {
+        self.width as usize
+    }
 
-    pub fn height(&self) -> usize { self.height as usize }
+    pub fn height(&self) -> usize {
+        self.height as usize
+    }
 
     pub fn quality(&self) -> f64 {
         self.quality
@@ -289,19 +346,29 @@ impl AstroImage {
         self.quality_image
     }
 
-    pub fn quality_star_indices(&self) -> Option<&Vec<usize>> { self.quality_star_indices.as_ref() }
+    pub fn quality_star_indices(&self) -> Option<&Vec<usize>> {
+        self.quality_star_indices.as_ref()
+    }
 
     pub fn star_count(&self) -> usize {
         self.detected_stars.len()
     }
 
-    pub fn background_raw_adu(&self) -> f64 { self.background_level_adu as f64 }
+    pub fn background_raw_adu(&self) -> f64 {
+        self.background_level_adu as f64
+    }
 
-    pub fn stars(&self) -> &Vec<Star> {&self.detected_stars}
+    pub fn stars(&self) -> &Vec<Star> {
+        &self.detected_stars
+    }
 
     /// Calculate the quality score for a selected set without changing the
     /// image's independent quality metric.
-    pub fn quality_for_star_indices(&self, indices: &HashSet<usize>, config: &AppConfig) -> Option<f64> {
+    pub fn quality_for_star_indices(
+        &self,
+        indices: &HashSet<usize>,
+        config: &AppConfig,
+    ) -> Option<f64> {
         let mut quality_sum = 0.0;
         let mut mag_sum = 0.0;
         for (i, s) in self.detected_stars.iter().enumerate() {
@@ -313,13 +380,29 @@ impl AstroImage {
         (mag_sum > 0.0).then_some(quality_sum / mag_sum)
     }
 
-    pub fn stars_with_magnitude_between(&self, min_magnitude: f64, max_magnitude: f64) -> Vec<usize> {
-        let start = self.detected_stars.partition_point(|s| s.magnitude > max_magnitude);
-        let end = self.detected_stars.partition_point(|s| s.magnitude >= min_magnitude);
-        self.detected_stars[start..end].iter().enumerate().map(|(i,_)| start + i).collect()
+    pub fn stars_with_magnitude_between(
+        &self,
+        min_magnitude: f64,
+        max_magnitude: f64,
+    ) -> Vec<usize> {
+        let start = self
+            .detected_stars
+            .partition_point(|s| s.magnitude > max_magnitude);
+        let end = self
+            .detected_stars
+            .partition_point(|s| s.magnitude >= min_magnitude);
+        self.detected_stars[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, _)| start + i)
+            .collect()
     }
 
-    pub fn recalculate_quality_for_star_indices(&mut self, indices: &HashSet<usize>, config: &AppConfig) {
+    pub fn recalculate_quality_for_star_indices(
+        &mut self,
+        indices: &HashSet<usize>,
+        config: &AppConfig,
+    ) {
         let mut quality_sum = 0.0;
         let mut mag_sum = 0.0;
         let mut used_indices: Vec<usize> = Vec::new();
@@ -341,12 +424,20 @@ impl AstroImage {
     fn fmt_impl(&self, f: &mut Formatter<'_>, max_stars: usize) -> std::fmt::Result {
         let n = self.detected_stars.len();
         let avg_top4 = if n > 0 {
-            self.detected_stars.iter().map(|s| s.top_4_pixels_part).sum::<f64>() / n as f64
+            self.detected_stars
+                .iter()
+                .map(|s| s.top_4_pixels_part)
+                .sum::<f64>()
+                / n as f64
         } else {
             0.0
         };
         let median_top4 = if n > 0 {
-            let mut fwhms: Vec<f64> = self.detected_stars.iter().map(|s| s.top_4_pixels_part).collect();
+            let mut fwhms: Vec<f64> = self
+                .detected_stars
+                .iter()
+                .map(|s| s.top_4_pixels_part)
+                .collect();
             fwhms.sort_by(|a, b| a.total_cmp(b));
             if n % 2 == 0 {
                 (fwhms[n / 2 - 1] + fwhms[n / 2]) / 2.0
@@ -358,19 +449,43 @@ impl AstroImage {
         };
 
         writeln!(f, "┌─────────────────────────────────────────┐")?;
-        writeln!(f, "│ Image Metadata Summary [{:>5.2} % ]       │", self.quality * 100.0)?;
+        writeln!(
+            f,
+            "│ Image Metadata Summary [{:>5.2} % ]       │",
+            self.quality * 100.0
+        )?;
         writeln!(f, "├─────────────────────────────────────────┤")?;
-        writeln!(f, "│  Dimensions   : {:>5} x {:<5}           │", self.width, self.height)?;
+        writeln!(
+            f,
+            "│  Dimensions   : {:>5} x {:<5}           │",
+            self.width, self.height
+        )?;
         writeln!(f, "│  Exposure     : {:>8.3} s              │", self.exp_t)?;
         writeln!(f, "│  Gain         : {:>8}                │", self.gain)?;
         writeln!(f, "│  ADU/e⁻       : {:>8.4}                │", self.adu_e)?;
         writeln!(f, "├─────────────────────────────────────────┤")?;
-        writeln!(f, "│  Background   : {:>8} ADU            │", self.background_level_adu)?;
-        writeln!(f, "│  Sigma (sky)  : {:>8} ADU            │", self.sigma_adu)?;
+        writeln!(
+            f,
+            "│  Background   : {:>8} ADU            │",
+            self.background_level_adu
+        )?;
+        writeln!(
+            f,
+            "│  Sigma (sky)  : {:>8} ADU            │",
+            self.sigma_adu
+        )?;
         writeln!(f, "├─────────────────────────────────────────┤")?;
         writeln!(f, "│  Stars found  : {:>8}                │", n)?;
-        writeln!(f, "│  Avg top4     : {:>8.2} %              │", avg_top4 * 100.0)?;
-        writeln!(f, "│  Median top4  : {:>8.2} %              │", median_top4 * 100.0)?;
+        writeln!(
+            f,
+            "│  Avg top4     : {:>8.2} %              │",
+            avg_top4 * 100.0
+        )?;
+        writeln!(
+            f,
+            "│  Median top4  : {:>8.2} %              │",
+            median_top4 * 100.0
+        )?;
         if let Some(ref qi) = self.quality_star_indices {
             writeln!(f, "├─────────────────────────────────────────┤")?;
             writeln!(f, "│  Quality from : {:>4} constellation star │", qi.len())?;
@@ -378,16 +493,31 @@ impl AstroImage {
         if let Some(qi) = self.quality_image {
             writeln!(f, "│  Quality (img): {:>8.2} %              │", qi * 100.0)?;
         }
-        writeln!(f, "│  QUALITY      : {:>8.2} %              │", self.quality * 100.0)?;
-        writeln!(f, "│  FWHM      : {:>8.2} %                 │", self.fwhm * 100.0)?;
+        writeln!(
+            f,
+            "│  QUALITY      : {:>8.2} %              │",
+            self.quality * 100.0
+        )?;
+        writeln!(
+            f,
+            "│  FWHM      : {:>8.2} %                 │",
+            self.fwhm * 100.0
+        )?;
         writeln!(f, "└─────────────────────────────────────────┘")?;
 
         let star_row = |f: &mut Formatter<'_>, i: usize, s: &Star| -> std::fmt::Result {
-            writeln!(f,
+            writeln!(
+                f,
                 "│{:>3} │({:>4},{:>4})   │{:>8.2}    │{:>10.0}  │{:>10.0}  │{:>10.4}  │{:>10.4}  │",
-                i + 1, s.pos.x, s.pos.y,
-                s.magnitude, s.magnitude_adu, s.brightest_pixel_adu,
-                s.brightest_pixel_part, s.top_4_pixels_part)
+                i + 1,
+                s.pos.x,
+                s.pos.y,
+                s.magnitude,
+                s.magnitude_adu,
+                s.brightest_pixel_adu,
+                s.brightest_pixel_part,
+                s.top_4_pixels_part
+            )
         };
         let header = || {
             [
@@ -398,9 +528,13 @@ impl AstroImage {
         };
         let footer = "└────┴──────────────┴────────────┴────────────┴────────────┴────────────┴────────────┘";
 
-        if let Some(ref qi) = self.quality_star_indices && !qi.is_empty() {
+        if let Some(ref qi) = self.quality_star_indices
+            && !qi.is_empty()
+        {
             writeln!(f, "\n  Top {} Constellation Quality Stars", max_stars)?;
-            for line in header() { writeln!(f, "{}", line)?; }
+            for line in header() {
+                writeln!(f, "{}", line)?;
+            }
             let shown = qi.iter().take(max_stars);
             for (i, &idx) in shown.enumerate() {
                 star_row(f, i, &self.detected_stars[idx])?;
@@ -409,9 +543,17 @@ impl AstroImage {
         } else {
             let mut by_top4: Vec<&Star> = self.detected_stars.iter().collect();
             by_top4.sort_by(|a, b| b.top_4_pixels_part.total_cmp(&a.top_4_pixels_part));
-            writeln!(f, "\n  Top {} Stars — Best Top-4 Pixel Concentration", max_stars)?;
-            for line in header() { writeln!(f, "{}", line)?; }
-            for (i, s) in by_top4.iter().take(max_stars).enumerate() { star_row(f, i, s)?; }
+            writeln!(
+                f,
+                "\n  Top {} Stars — Best Top-4 Pixel Concentration",
+                max_stars
+            )?;
+            for line in header() {
+                writeln!(f, "{}", line)?;
+            }
+            for (i, s) in by_top4.iter().take(max_stars).enumerate() {
+                star_row(f, i, s)?;
+            }
             writeln!(f, "{}", footer)
         }
     }
@@ -425,19 +567,26 @@ impl Display for AstroImage {
     }
 }
 const DIGIT_BITMAPS: [[u8; 15]; 10] = [
-    [1,1,1, 1,0,1, 1,0,1, 1,0,1, 1,1,1], // 0
-    [0,1,0, 1,1,0, 0,1,0, 0,1,0, 1,1,1], // 1
-    [1,1,0, 0,0,1, 0,1,0, 1,0,0, 1,1,1], // 2
-    [1,1,0, 0,0,1, 0,1,0, 0,0,1, 1,1,0], // 3
-    [1,0,1, 1,0,1, 1,1,1, 0,0,1, 0,0,1], // 4
-    [1,1,1, 1,0,0, 1,1,0, 0,0,1, 1,1,1], // 5
-    [0,1,1, 1,0,0, 1,1,1, 1,0,1, 0,1,1], // 6
-    [1,1,1, 0,0,1, 0,0,1, 0,0,1, 0,0,1], // 7
-    [1,1,1, 1,0,1, 1,1,1, 1,0,1, 1,1,1], // 8
-    [1,1,1, 1,0,1, 1,1,1, 0,0,1, 1,1,1], // 9
+    [1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1], // 0
+    [0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1], // 1
+    [1, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 1], // 2
+    [1, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0], // 3
+    [1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 0, 1], // 4
+    [1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 1], // 5
+    [0, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 1], // 6
+    [1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1], // 7
+    [1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1], // 8
+    [1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1], // 9
 ];
 
-fn draw_digit(img: &mut image::RgbImage, x0: i32, y0: i32, scale: i32, digit: usize, color: image::Rgb<u8>) {
+fn draw_digit(
+    img: &mut image::RgbImage,
+    x0: i32,
+    y0: i32,
+    scale: i32,
+    digit: usize,
+    color: image::Rgb<u8>,
+) {
     let bitmap = &DIGIT_BITMAPS[digit];
     for row in 0..5i32 {
         for col in 0..3i32 {
@@ -446,7 +595,11 @@ fn draw_digit(img: &mut image::RgbImage, x0: i32, y0: i32, scale: i32, digit: us
                     for dx in 0..scale {
                         let px = x0 + col * scale + dx;
                         let py = y0 + row * scale + dy;
-                        if px >= 0 && py >= 0 && (px as u32) < img.width() && (py as u32) < img.height() {
+                        if px >= 0
+                            && py >= 0
+                            && (px as u32) < img.width()
+                            && (py as u32) < img.height()
+                        {
                             img.put_pixel(px as u32, py as u32, color);
                         }
                     }
@@ -463,7 +616,8 @@ fn draw_number_label(img: &mut image::RgbImage, cx: i32, cy: i32, num: usize) {
     let gap = scale;
     let margin = scale;
 
-    let digits: Vec<usize> = num.to_string()
+    let digits: Vec<usize> = num
+        .to_string()
         .chars()
         .map(|c| (c as u8 - b'0') as usize)
         .collect();
@@ -483,8 +637,8 @@ fn draw_number_label(img: &mut image::RgbImage, cx: i32, cy: i32, num: usize) {
         }
     }
     let color = match num {
-        x if x < 10 =>  image::Rgb([200u8, 200u8, 0u8]),
-        _ =>  image::Rgb([50u8, 150u8, 0u8])
+        x if x < 10 => image::Rgb([200u8, 200u8, 0u8]),
+        _ => image::Rgb([50u8, 150u8, 0u8]),
     };
 
     let mut x_offset = lx + margin;

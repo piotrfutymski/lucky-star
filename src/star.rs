@@ -8,21 +8,27 @@ pub struct Star {
     pub brightest_pixel_adu: f64,
     pub brightest_pixel_part: f64,
     pub top_4_pixels_part: f64,
-    pub ill_defined: bool
+    pub ill_defined: bool,
 }
 
 impl Star {
-
-
-    pub fn new(pos: Vector2D<usize>, data: &Array<i16, IxDyn>, adu_e: f64, background_adu_global: u16, psf_size: usize) -> Star {
+    pub fn new(
+        pos: Vector2D<usize>,
+        data: &Array<i16, IxDyn>,
+        adu_e: f64,
+        background_adu_global: u16,
+        psf_size: usize,
+    ) -> Star {
         let mut background_adu = 0.0;
         let mut background_sum = 0;
-        for i in pos.x-psf_size..=pos.x+psf_size {
-            for j in pos.y-psf_size..=pos.y+psf_size {
-                if (i as i32 - pos.x as i32).abs()  < (psf_size / 2) as i32 || (j as i32 - pos.y as i32).abs()  < (psf_size / 2) as i32{
+        for i in pos.x - psf_size..=pos.x + psf_size {
+            for j in pos.y - psf_size..=pos.y + psf_size {
+                if (i as i32 - pos.x as i32).abs() < (psf_size / 2) as i32
+                    || (j as i32 - pos.y as i32).abs() < (psf_size / 2) as i32
+                {
                     continue;
                 }
-                if let Some(pixel) = data.get([i,j]){
+                if let Some(pixel) = data.get([i, j]) {
                     let v = pixel.wrapping_sub(i16::MIN) as f64;
                     if v < background_adu_global as f64 * 1.5 {
                         background_adu += v;
@@ -32,17 +38,18 @@ impl Star {
             }
         }
         background_adu = background_adu / background_sum as f64;
-        if background_adu == 0.0{
+        if background_adu == 0.0 {
             background_adu = background_adu_global as f64;
         }
-        let brightest_pixel = (data[[pos.x, pos.y]].wrapping_sub(i16::MIN) as u16 - background_adu as u16) as i32;
+        let brightest_pixel =
+            (data[[pos.x, pos.y]].wrapping_sub(i16::MIN) as u16 - background_adu as u16) as i32;
         let mut brightest_pixels = [0, 0, 0, 0];
         let mut magnitude = 0.0;
-        for i in pos.x-psf_size/2..=pos.x+psf_size/2 {
-            for j in pos.y-psf_size/2..=pos.y+psf_size/2 {
+        for i in pos.x - psf_size / 2..=pos.x + psf_size / 2 {
+            for j in pos.y - psf_size / 2..=pos.y + psf_size / 2 {
                 let v = data[[i, j]].wrapping_sub(i16::MIN) as u16;
                 let pixel_brightness = v as i32 - background_adu as i32;
-                if pixel_brightness > brightest_pixels[0]{
+                if pixel_brightness > brightest_pixels[0] {
                     brightest_pixels[0] = pixel_brightness;
                     brightest_pixels.sort()
                 }
@@ -52,14 +59,14 @@ impl Star {
 
         let top_4 = brightest_pixels.into_iter().sum::<i32>();
 
-        Star{
+        Star {
             pos,
             magnitude: magnitude / adu_e,
             magnitude_adu: magnitude,
             brightest_pixel_adu: brightest_pixel as f64,
             brightest_pixel_part: brightest_pixel as f64 / magnitude,
             top_4_pixels_part: top_4 as f64 / magnitude,
-            ill_defined: brightest_pixels[3] > brightest_pixel
+            ill_defined: brightest_pixels[3] > brightest_pixel,
         }
     }
 }
