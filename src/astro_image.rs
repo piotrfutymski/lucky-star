@@ -289,11 +289,29 @@ impl AstroImage {
         self.quality_image
     }
 
+    pub fn quality_star_indices(&self) -> Option<&Vec<usize>> { self.quality_star_indices.as_ref() }
+
     pub fn star_count(&self) -> usize {
         self.detected_stars.len()
     }
 
+    pub fn background_raw_adu(&self) -> f64 { self.background_level_adu as f64 }
+
     pub fn stars(&self) -> &Vec<Star> {&self.detected_stars}
+
+    /// Calculate the quality score for a selected set without changing the
+    /// image's independent quality metric.
+    pub fn quality_for_star_indices(&self, indices: &HashSet<usize>, config: &AppConfig) -> Option<f64> {
+        let mut quality_sum = 0.0;
+        let mut mag_sum = 0.0;
+        for (i, s) in self.detected_stars.iter().enumerate() {
+            if indices.contains(&i) && s.magnitude > config.min_photons_quality {
+                quality_sum += s.magnitude * s.top_4_pixels_part;
+                mag_sum += s.magnitude;
+            }
+        }
+        (mag_sum > 0.0).then_some(quality_sum / mag_sum)
+    }
 
     pub fn stars_with_magnitude_between(&self, min_magnitude: f64, max_magnitude: f64) -> Vec<usize> {
         let start = self.detected_stars.partition_point(|s| s.magnitude > max_magnitude);

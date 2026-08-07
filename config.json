@@ -13,5 +13,6 @@
 	"psf_size": 13,
 	"min_photons_quality": 300.0,
 	"rolling_avg_window": 100,
-	"star_pattern_position_tolerance_px": 7.0
+	"star_pattern_position_tolerance_px": 7.0,
+	"background_bias_adu": 0.0
 }
