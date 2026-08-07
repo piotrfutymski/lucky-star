@@ -47,7 +47,7 @@ impl Default for AppConfig {
             rolling_avg_window: 100,
             log_quality_window_t: 300.0,
             star_pattern_position_tolerance_px: 7.0,
-            background_bias_adu: 0.0,
+            background_bias_adu: 1000.0,
         }
     }
 }
@@ -166,6 +166,10 @@ struct Args {
     #[arg(long)]
     filter: bool,
 
+    /// Show detailed processing diagnostics.
+    #[arg(long)]
+    verbose: bool,
+
     #[arg(long)]
     snr: Option<f64>,
     #[arg(long)]
@@ -203,7 +207,7 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     star_pattern: Option<String>,
 
-    /// Quick analysis of the N newest FITS images; updates cache and skips charts.
+    /// Quick analysis of the N newest FITS images; skips charts.
     #[arg(short = 'c', long = "check-count", value_name = "N")]
     check_count: Option<usize>,
 
@@ -257,9 +261,10 @@ fn star_pattern_brightness_adu(stars: &[Star], constellation: &Constellation) ->
     )
 }
 
-fn star_pattern_snr(signal: Option<f64>, background_corrected_adu: f64) -> Option<f64> {
+fn star_pattern_snr(signal: Option<f64>, background_noise_adu: f64) -> Option<f64> {
     signal.and_then(|signal| {
-        (background_corrected_adu > 0.0).then_some(signal / background_corrected_adu.sqrt())
+        (background_noise_adu.is_finite() && background_noise_adu > 0.0)
+            .then_some(signal / background_noise_adu)
     })
 }
 
@@ -412,7 +417,7 @@ fn load_images(
                 let background_raw_adu = img.background_raw_adu();
                 let background_corrected_adu =
                     (background_raw_adu - config.background_bias_adu).max(0.0);
-                let snr = star_pattern_snr(star_brightness_adu, background_corrected_adu);
+                let snr = star_pattern_snr(star_brightness_adu, img.background_noise_adu());
                 if independent_quality.is_finite() {
                     quality_sum += independent_quality;
                     fwhm_sum += independent_fwhm;
@@ -646,32 +651,6 @@ fn write_quality_map(
 /* legacy selection helpers removed: filtering is implemented by metrics::FilterRule
 and must not be confused with the removed --take/--remove modes. */
 
-fn config_fingerprint(
-    config: &AppConfig,
-    crop: Option<f64>,
-    pattern: Option<&[RegisteredStar]>,
-    pattern_file: Option<&Path>,
-) -> String {
-    // Include the complete pattern file bytes.  This intentionally invalidates
-    // the cache even when only an auxiliary median field changes.
-    let pattern_bytes = pattern_file.and_then(|p| fs::read(p).ok());
-    let pattern_json = pattern.map(|p| {
-        p.iter()
-            .map(|s| {
-                (
-                    s.pos.x,
-                    s.pos.y,
-                    s.magnitude,
-                    s.use_in_quality,
-                    s.median_brightness_adu,
-                    s.median_brightest_pixel_part,
-                )
-            })
-            .collect::<Vec<_>>()
-    });
-    serde_json::to_string(&(config, crop, pattern_json, pattern_bytes)).unwrap_or_default()
-}
-
 fn image_to_metrics(image: &ImageInfo) -> metrics::MetricValues {
     metrics::MetricValues {
         quality: image.quality,
@@ -683,35 +662,11 @@ fn image_to_metrics(image: &ImageInfo) -> metrics::MetricValues {
         background_raw_adu: image.background_raw_adu,
         background_corrected_adu: image.background_corrected_adu,
         quality_star_pattern: image.quality_image,
+        quality_star_pattern_source: image.quality_image.is_some(),
         star_brightness_adu: image.star_brightness_adu,
         snr: image.snr,
         star_pattern_found: image.constellation_found == Some(true),
         matched_star_count: image.matched_star_count,
-    }
-}
-
-fn record_to_image(record: &metrics::CacheRecord, dir: &Path) -> ImageInfo {
-    let m = &record.metrics;
-    ImageInfo {
-        file_name: record.file_name.clone(),
-        file_path: dir.join(&record.file_name),
-        quality: m.quality,
-        fwhm: m.fwhm,
-        quality_image: m.quality_star_pattern,
-        star_count: m.star_count,
-        constellation_found: if m.star_pattern_found {
-            Some(true)
-        } else {
-            Some(false)
-        },
-        matched_star_count: m.matched_star_count,
-        star_brightness_adu: m.star_brightness_adu,
-        snr: m.snr,
-        brightest_star_adu: m.brightest_star_adu,
-        background_raw_adu: m.background_raw_adu,
-        background_corrected_adu: m.background_corrected_adu,
-        brightest_star_photons: m.brightest_star_photons,
-        star5_photons: m.star5_photons,
     }
 }
 
@@ -751,8 +706,9 @@ fn build_rules(args: &Args, has_pattern: bool) -> Result<Vec<metrics::FilterRule
     add(Quality, args.quality, args.quality_absolute)?;
     add(Fwhm, args.fwhm, args.fwhm_absolute)?;
     if args.filter && rules.is_empty() {
-        rules.push(metrics::FilterRule::relative(QualityStarPattern, 0.83)?);
-        rules.push(metrics::FilterRule::relative(Snr, 0.707)?);
+        rules.push(metrics::FilterRule::relative(QualityStarPattern, 0.8)?);
+        rules.push(metrics::FilterRule::relative(Background, 2.0)?);
+        rules.push(metrics::FilterRule::relative(StarBrightness, 0.7)?);
     }
     if rules.iter().any(|r| r.metric.requires_pattern()) && !has_pattern {
         return Err("filter requires a star pattern, but no pattern is available".into());
@@ -760,7 +716,7 @@ fn build_rules(args: &Args, has_pattern: bool) -> Result<Vec<metrics::FilterRule
     Ok(rules)
 }
 
-fn print_statistics(records: &[metrics::CacheRecord]) {
+fn print_statistics(records: &[metrics::MetricRecord]) {
     println!("\n--- METRIC STATISTICS ({} records) ---", records.len());
     for metric in [
         metrics::Metric::Quality,
@@ -924,11 +880,11 @@ fn bitmap_text(image: &mut image::RgbImage, x: u32, y: u32, text: &str, color: i
 
 fn draw_metric_chart(
     dir: &Path,
-    records: &[metrics::CacheRecord],
+    records: &[metrics::MetricRecord],
     metric: metrics::Metric,
 ) -> Result<(), String> {
     use image::{ImageBuffer, Rgb};
-    let mut ordered: Vec<&metrics::CacheRecord> = records.iter().collect();
+    let mut ordered: Vec<&metrics::MetricRecord> = records.iter().collect();
     ordered.sort_by(|a, b| {
         a.modified_ns
             .cmp(&b.modified_ns)
@@ -944,8 +900,9 @@ fn draw_metric_chart(
     let available: Vec<f64> = values.iter().filter_map(|v| *v).collect();
     let median = metrics::median(&mut available.clone()).unwrap_or(0.0);
     let suggested = match metric {
-        metrics::Metric::QualityStarPattern => Some(median * 0.83),
-        metrics::Metric::Snr => Some(median * 0.707),
+        metrics::Metric::QualityStarPattern => Some(median * 0.8),
+        metrics::Metric::Background => Some(median * 2.0),
+        metrics::Metric::StarBrightness => Some(median * 0.7),
         _ => None,
     };
     let mut scale_values = available.clone();
@@ -1046,7 +1003,7 @@ fn draw_metric_chart(
 
 fn filter_files(
     dir: &Path,
-    records: &[metrics::CacheRecord],
+    records: &[metrics::MetricRecord],
     rules: &[metrics::FilterRule],
 ) -> Result<(), String> {
     let medians = metrics::medians(records);
@@ -1127,90 +1084,29 @@ fn process_directory(
         None
     };
     let all_entries = collect_fits_files(dir);
+    println!("Input files discovered: {}", all_entries.len());
     if all_entries.is_empty() {
         return Err("no FITS files found".into());
     }
-    let pattern_file = args
-        .star_pattern
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| star_pattern::default_pattern_path(dir));
-    let fingerprint =
-        config_fingerprint(config, args.crop, registered_stars, pattern_file.as_deref());
-    let cache_path = dir.join("metrics_cache.json");
-    let mut cache = metrics::MetricsCache::load(&cache_path, &fingerprint)
-        .unwrap_or_else(|_| metrics::MetricsCache::empty(&fingerprint));
     let entries: Vec<_> = if let Some(n) = args.check_count {
-        let mut sorted: Vec<_> = all_entries.iter().map(|e| e.path()).collect();
-        sorted.sort_by(|a, b| {
-            fs::metadata(a)
-                .and_then(|m| m.modified())
-                .ok()
-                .cmp(&fs::metadata(b).and_then(|m| m.modified()).ok())
-                .then_with(|| a.file_name().cmp(&b.file_name()))
-        });
-        sorted
-            .into_iter()
-            .rev()
-            .take(n)
-            .filter_map(|p| {
-                fs::read_dir(dir)
-                    .ok()?
-                    .find_map(|e| e.ok().filter(|e| e.path() == p))
-            })
-            .collect()
-    } else {
-        all_entries.into_iter().collect()
-    };
-    let stale_paths: Vec<PathBuf> = entries
-        .iter()
-        .filter(|e| !cache.record_is_current(&e.path(), &fingerprint))
-        .map(|e| e.path())
-        .collect();
-    let stale: Vec<_> = stale_paths
-        .iter()
-        .filter_map(|path| {
-            fs::read_dir(dir)
-                .ok()?
-                .find_map(|e| e.ok().filter(|e| e.path() == *path))
-        })
-        .collect();
-    let analyzed = load_images(&stale, args.crop, config, registered_stars);
-    for image in &analyzed {
-        if let Ok(record) =
-            metrics::record_for(&image.file_path, &fingerprint, image_to_metrics(image))
-        {
-            cache.upsert(record);
-        }
-    }
-    if let Err(e) = cache.save(&cache_path) {
-        eprintln!("Warning: cannot save cache: {}", e);
-    }
-    let records: Vec<_> = if args.check_count.is_some() {
-        entries
-            .iter()
-            .filter_map(|e| {
-                cache
-                    .records
-                    .iter()
-                    .find(|r| r.file_name == e.file_name().to_string_lossy())
-            })
-            .cloned()
-            .collect()
-    } else {
-        cache
-            .records
-            .iter()
-            .filter(|r| dir.join(&r.file_name).is_file())
-            .cloned()
-            .collect()
-    };
-    let images: Vec<_> = records.iter().map(|r| record_to_image(r, dir)).collect();
-    write_quality_map(dir, &images, None, config);
+        all_entries.into_iter().rev().take(n).collect()
+    } else { all_entries };
+    println!("Analysis started");
+    let records: Vec<metrics::MetricRecord> = load_images(&entries, args.crop, config, registered_stars)
+        .iter().map(|image| metrics::MetricRecord {
+            file_name: image.file_name.clone(),
+            modified_ns: fs::metadata(&image.file_path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0),
+            metrics: image_to_metrics(image),
+        }).collect();
+    let images: Vec<_> = records.iter().map(|r| ImageInfo {
+        file_name: r.file_name.clone(), file_path: dir.join(&r.file_name), quality: r.metrics.quality, fwhm: r.metrics.fwhm,
+        quality_image: r.metrics.quality_star_pattern.filter(|_| r.metrics.quality_star_pattern_source), star_count: r.metrics.star_count,
+        constellation_found: Some(r.metrics.star_pattern_found), matched_star_count: r.metrics.matched_star_count, star_brightness_adu: r.metrics.star_brightness_adu, snr: r.metrics.snr,
+        brightest_star_adu: r.metrics.brightest_star_adu, background_raw_adu: r.metrics.background_raw_adu, background_corrected_adu: r.metrics.background_corrected_adu,
+        brightest_star_photons: r.metrics.brightest_star_photons, star5_photons: r.metrics.star5_photons }).collect();
+    if args.check_count.is_none() { write_quality_map(dir, &images, None, config); }
     print_statistics(&records);
-    if args.check_count.is_none() {
-        println!("Suggested filters: quality_star_pattern >= 0.83 × median; snr >= 0.707 × median");
-    }
+    println!("Analysis finished");
     if args.check_count.is_none()
         && !args.filter
         && build_rules(args, registered_stars.is_some())
@@ -1257,7 +1153,7 @@ fn make_star_pattern(
         return Err("folder contains no FITS files".into());
     }
     let sample_paths =
-        star_pattern::select_sample_paths(entries.iter().map(|e| e.path()).collect(), 20, 0);
+        star_pattern::select_sample_paths(entries.iter().map(|e| e.path()).collect(), 10, 0);
     let mut loaded = Vec::new();
     for path in sample_paths {
         match AstroImage::load(&path, None, config) {
@@ -1288,8 +1184,12 @@ fn make_star_pattern(
     );
     let candidates: Vec<_> = aggregated.iter().map(|a| a.sample.clone()).collect();
     let rec = star_pattern::recommend_stars(&candidates, reference.width(), reference.height());
-    if rec.len() != 3 {
-        return Err("input data does not contain a stable three-star pattern".into());
+    if aggregated.len() < 2 {
+        let _ = reference.save_stars_jpg(folder.join("star_pattern_reference_problem.jpg"));
+        return Err(format!("unable to generate pattern: fewer than 2 stars remain in all sampled frames ({}).", aggregated.len()).into());
+    }
+    if rec.len() < 3 {
+        println!("Only {} stable stars available; recommendation requires 3.", aggregated.len());
     }
     let recommended_numbers: Vec<usize> = rec
         .iter()
@@ -1315,7 +1215,7 @@ fn make_star_pattern(
                 .join(",")
         } else if answer.trim().eq_ignore_ascii_case("n") {
             println!(
-                "Enter three star numbers from star_pattern_candidates.jpg (for example 1,4,7):"
+                "Enter at least two star numbers from star_pattern_candidates.jpg (for example 1,4):"
             );
             let mut manual = String::new();
             io::stdin().read_line(&mut manual)?;
@@ -1329,31 +1229,18 @@ fn make_star_pattern(
         .filter(|s| !s.is_empty())
         .map(|s| s.parse::<usize>())
         .collect::<Result<_, _>>()?;
-    if selected.len() != 3
-        || selected
+    if selected.len() < 2 {
+        return Err("a valid star pattern requires at least 2 selected stars".into());
+    }
+    if selected
             .iter()
             .any(|n| *n == 0 || *n > reference_stars.len())
-        || {
-            let mut unique = selected.clone();
-            unique.sort_unstable();
-            unique.dedup();
-            unique.len() != 3
-        }
     {
-        if selected.len() != 3 {
-            return Err("select exactly three star numbers from the candidate JPEG".into());
-        }
-        if selected
-            .iter()
-            .any(|n| *n == 0 || *n > reference_stars.len())
-        {
-            return Err(format!(
-                "star number must be between 1 and {} in the candidate JPEG",
-                reference_stars.len()
-            )
+        return Err(format!(
+            "star number must be between 1 and {} in the candidate JPEG",
+            reference_stars.len()
+        )
             .into());
-        }
-        return Err("select three distinct star numbers from the candidate JPEG".into());
     }
     let mut pattern = Vec::new();
     for number in selected {
@@ -1385,11 +1272,14 @@ fn make_star_pattern(
 }
 
 fn main() {
+    println!("Starting lucky-star");
     let args = Args::parse();
+    println!("Arguments parsed");
 
     // Pattern generation is independent of any pre-existing pattern file.
     if let Some(folder) = &args.make_star_pattern {
         let config = AppConfig::load_or_default();
+    println!("Configuration loaded");
         if let Err(e) = config.validate() {
             eprintln!("Error: {}", e);
             std::process::exit(2);
@@ -1487,13 +1377,9 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("a.fits"), b"fixture").unwrap();
-        let record = metrics::CacheRecord {
+        let record = metrics::MetricRecord {
             file_name: "a.fits".into(),
-            size: 7,
             modified_ns: 1,
-            cache_format_version: metrics::CACHE_FORMAT_VERSION,
-            algorithm_version: metrics::ALGORITHM_VERSION.into(),
-            configuration_fingerprint: "test".into(),
             metrics: metrics::MetricValues {
                 quality: 1.0,
                 fwhm: 1.0,
@@ -1504,6 +1390,7 @@ mod tests {
                 background_raw_adu: 1.0,
                 background_corrected_adu: 1.0,
                 quality_star_pattern: None,
+                quality_star_pattern_source: false,
                 star_brightness_adu: None,
                 snr: None,
                 star_pattern_found: false,
@@ -1563,6 +1450,6 @@ mod tests {
         };
         let signal = star_pattern_brightness_adu(&stars, &constellation);
         assert_eq!(signal, Some(100.0));
-        assert_eq!(star_pattern_snr(signal, 25.0), Some(20.0));
+        assert_eq!(star_pattern_snr(signal, 25.0), Some(4.0));
     }
 }

@@ -193,10 +193,17 @@ impl Constellation {
         }
     }
 
-    fn find_in_image_by_geometry(_star: &RegisteredStar, image: &AstroImage) -> Vec<usize> {
-        // Candidate generation is deliberately brightness-blind.  Geometry is
-        // checked by the pairwise and final rigid-transform validation below.
-        (0..image.stars().len()).collect()
+    fn find_in_image_by_geometry(star: &RegisteredStar, image: &AstroImage) -> Vec<usize> {
+        let reference_flux = star.magnitude.max(1.0);
+        let mut candidates: Vec<usize> = (0..image.stars().len()).collect();
+        candidates.sort_by(|&a, &b| {
+            let flux_distance = |index: usize| {
+                let image_flux = image.stars()[index].magnitude.max(1.0);
+                (image_flux / reference_flux).ln().abs()
+            };
+            flux_distance(a).total_cmp(&flux_distance(b))
+        });
+        candidates
     }
 
     fn validate_complete_geometry(

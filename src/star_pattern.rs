@@ -58,8 +58,8 @@ pub fn validate_pattern(
     if !position_tolerance_px.is_finite() || position_tolerance_px <= 0.0 {
         return Err("star_pattern_position_tolerance_px must be greater than zero".into());
     }
-    if !pattern.iter().any(|s| s.use_in_quality) {
-        return Err("star pattern must contain at least one star with use_in_quality: true".into());
+    if pattern.iter().filter(|s| s.use_in_quality).count() < 2 {
+        return Err("star pattern must contain at least two stars with use_in_quality: true".into());
     }
     if pattern
         .iter()
@@ -204,7 +204,9 @@ pub fn aggregate_samples(
             }
         }
     }
-    let required = (frames.len().div_ceil(2)).max(1);
+    // A pattern represents the whole session: every reference star must be
+    // matched in every sampled frame.
+    let required = frames.len().max(1);
     tracks
         .into_iter()
         .enumerate()

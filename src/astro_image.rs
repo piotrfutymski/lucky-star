@@ -21,6 +21,8 @@ pub struct AstroImage {
 
     background_level_adu: u16,
     sigma_adu: u16,
+    /// Robust standard deviation of the sampled, star-rejected background.
+    background_noise_adu: f64,
 
     psf_size: usize,
     detected_stars: Vec<Star>,
@@ -74,6 +76,7 @@ impl AstroImage {
             exp_t,
             background_level_adu: 0,
             sigma_adu: 0,
+            background_noise_adu: 0.0,
             detected_stars: vec![],
             data: Array::zeros(IxDyn(&[0, 0])),
             quality: 0.0,
@@ -130,6 +133,7 @@ impl AstroImage {
 
         self.background_level_adu = background_value as u16;
         self.sigma_adu = sigma as u16;
+        self.background_noise_adu = sigma as f64;
     }
 
     fn find_stars(&mut self, data: &Array<i16, IxDyn>, crop: Option<f64>, config: &AppConfig) {
@@ -162,7 +166,28 @@ impl AstroImage {
                 }
             }
         }
-        for key in potential_stars.keys().cloned().collect::<Vec<_>>() {
+        let mut potential_star_keys = potential_stars.keys().cloned().collect::<Vec<_>>();
+        potential_star_keys.sort_unstable_by_key(|&(row, column)| (row, column));
+
+        for key in &potential_star_keys {
+            let Some((_, active)) = potential_stars.get(key) else {
+                continue;
+            };
+            if !*active {
+                continue;
+            }
+
+            let has_neighbour = (key.0 - 1..=key.0 + 1).any(|i| {
+                (key.1 - 1..=key.1 + 1).any(|j| {
+                    (i != key.0 || j != key.1) && potential_stars.contains_key(&(i, j))
+                })
+            });
+            if !has_neighbour {
+                potential_stars.get_mut(key).unwrap().1 = false;
+            }
+        }
+
+        for key in potential_star_keys {
             let potential = potential_stars.get(&key).cloned().unwrap();
             if potential.1 {
                 let mut is_star = true;
@@ -172,6 +197,9 @@ impl AstroImage {
                             continue;
                         }
                         if let Some(potential_next_to) = potential_stars.get_mut(&(i, j)) {
+                            if !potential_next_to.1 {
+                                continue;
+                            }
                             if potential_next_to.0 >= potential.0 {
                                 is_star = false;
                             } else {
@@ -200,13 +228,21 @@ impl AstroImage {
                     + (compare_pos.1 as i32 - pos.1 as i32).pow(2)
                     < (psf_size * psf_size) as i32
                 {
-                    to_delete.insert(i);
-                    to_delete.insert(j);
+                    let pos_brightness =
+                        data[[pos.0, pos.1]].wrapping_sub(i16::MIN) as u32;
+                    let compare_brightness =
+                        data[[compare_pos.0, compare_pos.1]].wrapping_sub(i16::MIN) as u32;
+
+                    if pos_brightness >= compare_brightness {
+                        to_delete.insert(j);
+                    } else {
+                        to_delete.insert(i);
+                    }
                     break;
                 }
             }
         }
-        let mut to_delete = to_delete.into_iter().collect::<Vec<_>>();
+        let mut to_delete = to_delete.into_iter().collect::<Vec<usize>>();
         to_delete.sort_by(|a, b| b.cmp(a));
         for index in to_delete {
             star_pos.remove(index);
@@ -353,6 +389,10 @@ impl AstroImage {
 
     pub fn background_raw_adu(&self) -> f64 {
         self.background_level_adu as f64
+    }
+
+    pub fn background_noise_adu(&self) -> f64 {
+        self.background_noise_adu
     }
 
     pub fn stars(&self) -> &Vec<Star> {

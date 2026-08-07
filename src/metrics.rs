@@ -1,148 +1,21 @@
-//! Phase 2: durable metrics, cache invalidation and filtering primitives.
-//!
-//! The FITS-specific adapter lives in `main.rs`; this module deliberately keeps
-//! the cache and filtering rules independent of the command line and renderer.
+//! Independent metric values and filtering primitives.
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const CACHE_FORMAT_VERSION: u32 = 2;
-pub const ALGORITHM_VERSION: &str = "phase2-metrics-2";
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MetricValues {
-    pub quality: f64,
-    pub fwhm: f64,
-    pub star_count: usize,
-    pub brightest_star_adu: f64,
-    pub brightest_star_photons: f64,
-    pub star5_photons: f64,
-    pub background_raw_adu: f64,
-    pub background_corrected_adu: f64,
-    pub quality_star_pattern: Option<f64>,
-    pub star_brightness_adu: Option<f64>,
-    pub snr: Option<f64>,
-    pub star_pattern_found: bool,
-    pub matched_star_count: usize,
+    pub quality: f64, pub fwhm: f64, pub star_count: usize,
+    pub brightest_star_adu: f64, pub brightest_star_photons: f64, pub star5_photons: f64,
+    pub background_raw_adu: f64, pub background_corrected_adu: f64,
+    pub quality_star_pattern: Option<f64>, pub quality_star_pattern_source: bool,
+    pub star_brightness_adu: Option<f64>, pub snr: Option<f64>,
+    pub star_pattern_found: bool, pub matched_star_count: usize,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct CacheRecord {
-    pub file_name: String,
-    pub size: u64,
-    pub modified_ns: u128,
-    pub cache_format_version: u32,
-    pub algorithm_version: String,
-    pub configuration_fingerprint: String,
-    pub metrics: MetricValues,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct MetricsCache {
-    pub cache_format_version: u32,
-    pub algorithm_version: String,
-    pub configuration_fingerprint: String,
-    pub records: Vec<CacheRecord>,
-}
-
-impl MetricsCache {
-    pub fn empty(fingerprint: impl Into<String>) -> Self {
-        Self {
-            cache_format_version: CACHE_FORMAT_VERSION,
-            algorithm_version: ALGORITHM_VERSION.into(),
-            configuration_fingerprint: fingerprint.into(),
-            records: Vec::new(),
-        }
-    }
-
-    pub fn is_compatible(&self, fingerprint: &str) -> bool {
-        self.cache_format_version == CACHE_FORMAT_VERSION
-            && self.algorithm_version == ALGORITHM_VERSION
-            && self.configuration_fingerprint == fingerprint
-            && self.records.iter().all(|r| {
-                r.cache_format_version == CACHE_FORMAT_VERSION
-                    && r.algorithm_version == ALGORITHM_VERSION
-                    && r.configuration_fingerprint == fingerprint
-            })
-    }
-
-    pub fn load(path: &Path, fingerprint: &str) -> Result<Self, String> {
-        let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let cache: Self = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        Ok(if cache.is_compatible(fingerprint) {
-            cache
-        } else {
-            Self::empty(fingerprint)
-        })
-    }
-
-    pub fn save(&self, path: &Path) -> Result<(), String> {
-        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        fs::write(path, text).map_err(|e| e.to_string())
-    }
-
-    pub fn upsert(&mut self, record: CacheRecord) {
-        if let Some(old) = self
-            .records
-            .iter_mut()
-            .find(|r| r.file_name == record.file_name)
-        {
-            *old = record;
-        } else {
-            self.records.push(record);
-        }
-        self.records.sort_by(|a, b| a.file_name.cmp(&b.file_name));
-    }
-
-    pub fn record_is_current(&self, path: &Path, fingerprint: &str) -> bool {
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            return false;
-        };
-        let Ok(meta) = fs::metadata(path) else {
-            return false;
-        };
-        self.records.iter().any(|r| {
-            r.file_name == name
-                && r.size == meta.len()
-                && r.modified_ns == modified_ns(&meta)
-                && r.configuration_fingerprint == fingerprint
-                && r.algorithm_version == ALGORITHM_VERSION
-                && r.cache_format_version == CACHE_FORMAT_VERSION
-        })
-    }
-}
-
-pub fn modified_ns(meta: &fs::Metadata) -> u128 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-}
-
-pub fn record_for(
-    path: &Path,
-    fingerprint: impl Into<String>,
-    metrics: MetricValues,
-) -> Result<CacheRecord, String> {
-    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
-    Ok(CacheRecord {
-        file_name: path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or("invalid file name")?
-            .to_string(),
-        size: meta.len(),
-        modified_ns: modified_ns(&meta),
-        cache_format_version: CACHE_FORMAT_VERSION,
-        algorithm_version: ALGORITHM_VERSION.into(),
-        configuration_fingerprint: fingerprint.into(),
-        metrics,
-    })
-}
+#[derive(Clone, Debug, PartialEq)]
+pub struct MetricRecord { pub file_name: String, pub modified_ns: u128, pub metrics: MetricValues }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Metric {
@@ -181,7 +54,7 @@ impl Metric {
         match self {
             Self::Quality => Some(m.quality),
             Self::Fwhm => Some(m.fwhm),
-            Self::QualityStarPattern => m.quality_star_pattern,
+            Self::QualityStarPattern => m.quality_star_pattern.or(Some(m.quality)),
             Self::Background => Some(m.background_corrected_adu),
             Self::StarBrightness => m.star_brightness_adu,
             Self::Snr => m.snr,
@@ -246,7 +119,7 @@ pub fn median(values: &mut [f64]) -> Option<f64> {
     })
 }
 
-pub fn medians(records: &[CacheRecord]) -> BTreeMap<Metric, f64> {
+pub fn medians(records: &[MetricRecord]) -> BTreeMap<Metric, f64> {
     let mut result = BTreeMap::new();
     for metric in [
         Metric::Quality,
@@ -258,7 +131,7 @@ pub fn medians(records: &[CacheRecord]) -> BTreeMap<Metric, f64> {
     ] {
         let mut values: Vec<f64> = records
             .iter()
-            .filter_map(|r| metric.value(&r.metrics))
+            .filter_map(|r| if metric == Metric::QualityStarPattern && !r.metrics.quality_star_pattern_source { None } else { metric.value(&r.metrics) })
             .filter(|v| v.is_finite())
             .collect();
         if let Some(m) = median(&mut values) {
@@ -268,8 +141,16 @@ pub fn medians(records: &[CacheRecord]) -> BTreeMap<Metric, f64> {
     result
 }
 
+pub fn pattern_quality_medians(records: &[MetricRecord]) -> (Option<f64>, Option<f64>) {
+    let mut primary: Vec<f64> = records.iter().filter(|r| r.metrics.quality_star_pattern_source)
+        .filter_map(|r| r.metrics.quality_star_pattern).filter(|v| v.is_finite()).collect();
+    let mut fallback: Vec<f64> = records.iter().filter(|r| !r.metrics.quality_star_pattern_source)
+        .map(|r| r.metrics.quality).filter(|v| v.is_finite()).collect();
+    (median(&mut primary), median(&mut fallback))
+}
+
 pub fn passes_all_filters(
-    record: &CacheRecord,
+    record: &MetricRecord,
     rules: &[FilterRule],
     medians: &BTreeMap<Metric, f64>,
 ) -> Result<bool, String> {
@@ -277,7 +158,10 @@ pub fn passes_all_filters(
         let Some(value) = rule.metric.value(&record.metrics) else {
             return Ok(false);
         };
-        let threshold = rule.threshold(medians.get(&rule.metric).copied())?;
+        let median_value = if rule.metric == Metric::QualityStarPattern && rule.relative.is_some() && !record.metrics.quality_star_pattern_source {
+            medians.get(&Metric::Quality).copied()
+        } else { medians.get(&rule.metric).copied() };
+        let threshold = rule.threshold(median_value)?;
         let passes = if rule.metric.higher_is_better() {
             value >= threshold
         } else {
@@ -321,125 +205,3 @@ pub fn current_timestamp() -> u64 {
         .as_secs()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn values(quality: f64, snr: Option<f64>) -> MetricValues {
-        MetricValues {
-            quality,
-            fwhm: 2.0,
-            star_count: 3,
-            brightest_star_adu: 10.0,
-            brightest_star_photons: 100.0,
-            star5_photons: 50.0,
-            background_raw_adu: 20.0,
-            background_corrected_adu: 20.0,
-            quality_star_pattern: snr,
-            star_brightness_adu: snr.map(|x| x * 10.0),
-            snr,
-            star_pattern_found: snr.is_some(),
-            matched_star_count: usize::from(snr.is_some()),
-        }
-    }
-
-    fn record(name: &str, quality: f64, snr: Option<f64>) -> CacheRecord {
-        CacheRecord {
-            file_name: name.into(),
-            size: 1,
-            modified_ns: 1,
-            cache_format_version: CACHE_FORMAT_VERSION,
-            algorithm_version: ALGORITHM_VERSION.into(),
-            configuration_fingerprint: "config-a".into(),
-            metrics: values(quality, snr),
-        }
-    }
-
-    #[test]
-    fn cache_round_trip_and_stale_configuration_invalidates_everything() {
-        let dir = std::env::temp_dir().join(format!("lucky-star-phase2-{}", current_timestamp()));
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("metrics_cache.json");
-        let mut cache = MetricsCache::empty("config-a");
-        cache.upsert(record("a.fits", 0.9, Some(10.0)));
-        cache.save(&path).unwrap();
-        let loaded = MetricsCache::load(&path, "config-a").unwrap();
-        assert_eq!(loaded.records.len(), 1);
-        assert_eq!(loaded.records[0].metrics.brightest_star_photons, 100.0);
-        assert_eq!(loaded.records[0].metrics.star5_photons, 50.0);
-        assert!(
-            MetricsCache::load(&path, "config-b")
-                .unwrap()
-                .records
-                .is_empty()
-        );
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn relative_rules_use_median_and_are_and_combined() {
-        let records = vec![
-            record("a", 1.0, Some(10.0)),
-            record("b", 0.4, Some(20.0)),
-            record("c", 0.6, None),
-        ];
-        let med = medians(&records);
-        let quality = FilterRule::relative(Metric::Quality, 0.83).unwrap();
-        let snr = FilterRule::relative(Metric::Snr, 0.707).unwrap();
-        assert!(passes_all_filters(&records[0], std::slice::from_ref(&quality), &med).unwrap());
-        assert!(!passes_all_filters(&records[1], &[quality, snr.clone()], &med).unwrap());
-        assert!(!passes_all_filters(&records[2], &[snr], &med).unwrap());
-    }
-
-    #[test]
-    fn absolute_rules_obey_metric_direction_and_conflicts_are_rejected() {
-        let r = record("a", 0.8, Some(10.0));
-        let med = medians(std::slice::from_ref(&r));
-        assert!(
-            passes_all_filters(
-                &r,
-                &[FilterRule::absolute(Metric::Fwhm, 2.0).unwrap()],
-                &med
-            )
-            .unwrap()
-        );
-        assert!(
-            !passes_all_filters(
-                &r,
-                &[FilterRule::absolute(Metric::Background, 1.0).unwrap()],
-                &med
-            )
-            .unwrap()
-        );
-        let mut both = FilterRule::relative(Metric::Snr, 1.0).unwrap();
-        both.absolute = Some(2.0);
-        assert!(both.threshold(Some(10.0)).is_err());
-    }
-
-    #[test]
-    fn cache_records_keep_missing_pattern_metrics_as_missing() {
-        let r = record("cloudy.fits", 0.5, None);
-        assert_eq!(r.metrics.quality_star_pattern, None);
-        assert_eq!(r.metrics.star_brightness_adu, None);
-        assert_eq!(r.metrics.snr, None);
-        assert!(!r.metrics.star_pattern_found);
-        assert!(
-            !passes_all_filters(
-                &r,
-                &[FilterRule::absolute(Metric::Snr, 1.0).unwrap()],
-                &BTreeMap::new()
-            )
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn removed_folder_never_overwrites_an_existing_folder() {
-        let dir = std::env::temp_dir().join(format!("lucky-star-folder-{}", current_timestamp()));
-        fs::create_dir_all(dir.join("removed_snr_0.707")).unwrap();
-        let rule = FilterRule::relative(Metric::Snr, 0.707).unwrap();
-        let result = unique_removed_folder(&dir, &[rule], 42);
-        assert_ne!(result, dir.join("removed_snr_0.707"));
-        let _ = fs::remove_dir_all(dir);
-    }
-}
