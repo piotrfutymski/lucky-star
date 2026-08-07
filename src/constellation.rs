@@ -40,6 +40,7 @@ impl<'de> Deserialize<'de> for RegisteredStar {
 pub fn load_stars_from_json(path: impl AsRef<Path>) -> Result<Vec<RegisteredStar>, Box<dyn Error>> {
     let content = std::fs::read_to_string(path)?;
     let stars: Vec<RegisteredStar> = serde_json::from_str(&content)?;
+    if !stars.iter().any(|s| s.use_in_quality) { return Err("star pattern must contain at least one star with use_in_quality: true".into()); }
     Ok(stars)
 }
 
@@ -47,16 +48,22 @@ pub struct Constellation{
     pub registered_stars: Vec<RegisteredStar>,
     pub found: bool,
     pub star_mapping: HashMap<usize, usize>,
-    pub transform: Option<(Vector2D<f32>, f32)>
+    pub transform: Option<(Vector2D<f32>, f32)>,
+    pub position_tolerance_px: f32
 }
 
 impl Constellation{
-    pub fn find_in_image(stars: Vec<RegisteredStar>, image: &AstroImage) -> Constellation{
+    pub fn find_in_image(stars: Vec<RegisteredStar>, image: &AstroImage) -> Constellation {
+        Self::find_in_image_with_tolerance(stars, image, 7.0)
+    }
+
+    pub fn find_in_image_with_tolerance(stars: Vec<RegisteredStar>, image: &AstroImage, position_tolerance_px: f32) -> Constellation {
         let mut res = Constellation{
             registered_stars: stars,
             found: false,
             star_mapping: Default::default(),
             transform: None,
+            position_tolerance_px,
         };
         let mut mapping = HashMap::new();
         let mut transform = None;
@@ -75,7 +82,7 @@ impl Constellation{
             self.transform = *transform;
             return;
         }
-        let possible_mappings = Self::find_possible_mappings(&self.registered_stars[idx], image, &self.registered_stars, &test_mapping, *transform);
+        let possible_mappings = Self::find_possible_mappings(&self.registered_stars[idx], image, &self.registered_stars, &test_mapping, *transform, self.position_tolerance_px);
         for mapping in possible_mappings{
             test_mapping.insert(idx, mapping);
             if test_mapping.len() == 2{
@@ -97,15 +104,15 @@ impl Constellation{
         }
     }
 
-    fn find_possible_mappings(star: &RegisteredStar, image: &AstroImage, stars: &Vec<RegisteredStar>, current_mapping: &HashMap<usize, usize>, transform: Option<(Vector2D<f32>, f32)>) -> Vec<usize> {
+    fn find_possible_mappings(star: &RegisteredStar, image: &AstroImage, stars: &Vec<RegisteredStar>, current_mapping: &HashMap<usize, usize>, transform: Option<(Vector2D<f32>, f32)>, tolerance: f32) -> Vec<usize> {
         if current_mapping.is_empty(){
-            Self::find_in_image_with_magnitude(star, image)
+            Self::find_in_image_by_geometry(star, image)
         } else if current_mapping.len() == 1{
             let length_to_match = (star.pos.as_f32s() - stars[0].pos.as_f32s()).length();
             let first_star_pos = image.stars().get(*current_mapping.values().next().unwrap()).unwrap().pos;
-            Self::find_in_image_with_magnitude(star, image)
+            Self::find_in_image_by_geometry(star, image)
                 .into_iter()
-                .filter(|m|Self::is_in_range(length_to_match, first_star_pos, image.stars().get(*m).unwrap().pos))
+                .filter(|m|Self::is_in_range(length_to_match, first_star_pos, image.stars().get(*m).unwrap().pos, tolerance))
                 .collect()
         } else {
             let transform = transform.unwrap();
@@ -114,24 +121,22 @@ impl Constellation{
             let angle = delta.angle() + transform.1;
             let image_star0 = stars[0].pos.as_f32s() + transform.0;
             let calculated_position = image_star0 + Vector2D::new(length * angle.cos(), length * angle.sin());
-            Self::find_in_image_with_magnitude(star, image)
+            Self::find_in_image_by_geometry(star, image)
                 .into_iter()
                 .filter(|m|{
                     let possible_star_pos = image.stars().get(*m).unwrap().pos.as_f32s();
-                    (possible_star_pos - calculated_position).length() < 7.0
+                    (possible_star_pos - calculated_position).length() <= tolerance
                 })
                 .collect()
         }
     }
 
-    fn find_in_image_with_magnitude(star: &RegisteredStar, image: &AstroImage) -> Vec<usize> {
-        let max_magnitude = star.magnitude * 1.7;
-        let min_magnitude = star.magnitude * 0.5;
-        image.stars_with_magnitude_between(min_magnitude, max_magnitude)
+    fn find_in_image_by_geometry(_star: &RegisteredStar, image: &AstroImage) -> Vec<usize> {
+        (0..image.stars().len()).collect()
     }
 
-    fn is_in_range(length_to_match: f32, p1: Vector2D<usize>, p2: Vector2D<usize>) -> bool {
+    fn is_in_range(length_to_match: f32, p1: Vector2D<usize>, p2: Vector2D<usize>, tolerance: f32) -> bool {
         let length = Vector2D::new(p1.x as f32 - p2.x as f32, p1.y as f32 - p2.y as f32).length();
-        (length - length_to_match).abs() < 7.0
+        (length - length_to_match).abs() <= tolerance
     }
 }

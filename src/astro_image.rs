@@ -269,6 +269,10 @@ impl AstroImage {
         Ok(())
     }
 
+    pub fn width(&self) -> usize { self.width as usize }
+
+    pub fn height(&self) -> usize { self.height as usize }
+
     pub fn quality(&self) -> f64 {
         self.quality
     }

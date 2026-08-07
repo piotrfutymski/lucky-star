@@ -13,6 +13,7 @@ pub mod astro_image;
 pub mod star;
 pub mod helpers;
 pub mod constellation;
+pub mod star_pattern;
 
 
 pub struct AppConfig {
@@ -23,6 +24,7 @@ pub struct AppConfig {
     min_photons_quality: f64,
     rolling_avg_window: usize,
     log_quality_window_t: f64,
+    pub star_pattern_position_tolerance_px: f64,
 }
 
 impl Default for AppConfig {
@@ -42,6 +44,7 @@ impl Default for AppConfig {
             min_photons_quality: 450.0,
             rolling_avg_window: 100,
             log_quality_window_t: 300.0,
+            star_pattern_position_tolerance_px: 7.0,
         }
     }
 }
@@ -67,6 +70,8 @@ impl<'de> Deserialize<'de> for AppConfig {
             rolling_avg_window: Option<usize>,
             #[serde(default)]
             log_quality_window_t: Option<f64>,
+            #[serde(default)]
+            star_pattern_position_tolerance_px: Option<f64>,
         }
 
         let partial = PartialAppConfig::deserialize(deserializer)?;
@@ -90,6 +95,7 @@ impl<'de> Deserialize<'de> for AppConfig {
             log_quality_window_t: partial
                 .log_quality_window_t
                 .unwrap_or(default.log_quality_window_t),
+            star_pattern_position_tolerance_px: partial.star_pattern_position_tolerance_px.unwrap_or(default.star_pattern_position_tolerance_px),
         })
     }
 }
@@ -164,6 +170,10 @@ struct Args {
     /// Move all files into subdirectories named by their rounded quality percentage (folder mode only)
     #[arg(long)]
     divide: bool,
+
+    /// Interactively generate stars_pattern.json from a session folder
+    #[arg(long, value_name = "FOLDER")]
+    make_star_pattern: Option<String>,
 }
 
 struct ImageInfo {
@@ -181,7 +191,7 @@ struct ImageInfo {
 
 
 fn apply_constellation_quality(img: &mut AstroImage, registered_stars: &[RegisteredStar], config: &AppConfig, label: &str) -> bool {
-    let constellation = Constellation::find_in_image(registered_stars.to_vec(), img);
+    let constellation = Constellation::find_in_image_with_tolerance(registered_stars.to_vec(), img, config.star_pattern_position_tolerance_px as f32);
     if constellation.found {
         let quality_indices: HashSet<usize> = constellation.registered_stars.iter()
             .enumerate()
@@ -660,6 +670,37 @@ fn check_seeing(args: &Args, registered_stars: &Option<Vec<RegisteredStar>>, con
     println!("-----------------------------------\n");
 }
 
+fn make_star_pattern(folder: &Path, config: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let entries = collect_fits_files(folder);
+    if entries.is_empty() { return Err("folder contains no FITS files".into()); }
+    let sample_paths = star_pattern::select_sample_paths(entries.iter().map(|e| e.path()).collect(), 20, 0);
+    let mut samples = Vec::new();
+    let mut first: Option<AstroImage> = None;
+    for path in sample_paths {
+        let img = AstroImage::load(&path, None, config)?;
+        if first.is_none() { first = Some(img); } else {
+            for s in img.stars() { samples.push(star_pattern::PatternStarSample { x:s.pos.x, y:s.pos.y, magnitude:s.magnitude, brightest_pixel_part:s.brightest_pixel_part }); }
+        }
+    }
+    let image = first.ok_or("unable to load FITS samples")?;
+    let rec = star_pattern::recommend_stars(&samples, image.width(), image.height());
+    if rec.len() != 3 { return Err("input data does not contain a sensible three-star pattern".into()); }
+    let mut pattern = Vec::new();
+    for &idx in &rec {
+        let s = &samples[idx];
+        pattern.push(star_pattern::StarPatternEntry { x:s.x, y:s.y, magnitude:s.magnitude, use_in_quality:true, median_brightness:Some(s.magnitude), median_brightest_pixel_part:Some(s.brightest_pixel_part) });
+    }
+    image.save_stars_jpg(folder.join("star_pattern_candidates.jpg"))?;
+    println!("Recommended stars: {:?}", rec.iter().map(|i| i + 1).collect::<Vec<_>>());
+    println!("Accept recommendation? [Y/n]");
+    let mut answer = String::new(); std::io::stdin().read_line(&mut answer)?;
+    if answer.trim().eq_ignore_ascii_case("n") { return Err("manual selection is not available without --star-pattern-numbers".into()); }
+    let output = folder.join("stars_pattern.json");
+    std::fs::write(&output, serde_json::to_string_pretty(&pattern)?)?;
+    println!("Pattern written to {}", output.display());
+    Ok(())
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -669,8 +710,8 @@ fn main() {
             std::process::exit(1);
         })),
         None => {
-            let default_stars = Path::new("stars.json");
-            if default_stars.exists() {
+            let default_stars = star_pattern::default_pattern_path(Path::new(&args.path));
+            if let Some(default_stars) = default_stars {
                 match load_stars_from_json(default_stars) {
                     Ok(stars) => {
                         println!("Using stars.json from current directory.");
@@ -688,7 +729,10 @@ fn main() {
     };
 
     let config = AppConfig::load_or_default();
-
+    if let Some(folder) = &args.make_star_pattern {
+        if let Err(e) = make_star_pattern(Path::new(folder), &config) { eprintln!("Error creating star pattern: {}", e); std::process::exit(1); }
+        return;
+    }
 
     let path = Path::new(&args.path);
     if path.is_file() {
