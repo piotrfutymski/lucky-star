@@ -10,7 +10,7 @@ pub struct RegisteredStar {
     pub pos: Vector2D<usize>,
     pub magnitude: f64,
     pub use_in_quality: bool,
-    pub median_brightness: Option<f64>,
+    pub median_brightness_adu: Option<f64>,
     pub median_brightest_pixel_part: Option<f64>,
 }
 
@@ -22,7 +22,8 @@ struct RegisteredStarJson {
     magnitude: f64,
     use_in_quality: bool,
     #[serde(default)]
-    median_brightness: Option<f64>,
+    #[serde(alias = "median_brightness")]
+    median_brightness_adu: Option<f64>,
     #[serde(default)]
     median_brightest_pixel_part: Option<f64>,
 }
@@ -33,7 +34,7 @@ impl From<RegisteredStarJson> for RegisteredStar {
             pos: Vector2D::new(j.x, j.y),
             magnitude: j.magnitude,
             use_in_quality: j.use_in_quality,
-            median_brightness: j.median_brightness,
+            median_brightness_adu: j.median_brightness_adu,
             median_brightest_pixel_part: j.median_brightest_pixel_part,
         }
     }
@@ -113,7 +114,7 @@ impl Constellation {
             &self.registered_stars[idx],
             image,
             &self.registered_stars,
-            &test_mapping,
+            test_mapping,
             *transform,
             self.position_tolerance_px,
         );
@@ -149,7 +150,7 @@ impl Constellation {
     fn find_possible_mappings(
         star: &RegisteredStar,
         image: &AstroImage,
-        stars: &Vec<RegisteredStar>,
+        stars: &[RegisteredStar],
         current_mapping: &HashMap<usize, usize>,
         transform: Option<(Vector2D<f32>, f32)>,
         tolerance: f32,

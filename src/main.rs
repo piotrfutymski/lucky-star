@@ -1,5 +1,6 @@
 use crate::astro_image::{AstroImage, fwhm_from_quality};
 use crate::constellation::{Constellation, RegisteredStar, load_stars_from_json};
+use crate::star::Star;
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
@@ -110,10 +111,12 @@ impl<'de> Deserialize<'de> for AppConfig {
 
 impl AppConfig {
     fn validate(&self) -> Result<(), String> {
-        if self.background_bias_adu < 0.0 {
-            return Err("background_bias_adu must not be negative".into());
+        if !self.background_bias_adu.is_finite() || self.background_bias_adu < 0.0 {
+            return Err("background_bias_adu must be finite and must not be negative".into());
         }
-        if self.star_pattern_position_tolerance_px <= 0.0 {
+        if !self.star_pattern_position_tolerance_px.is_finite()
+            || self.star_pattern_position_tolerance_px <= 0.0
+        {
             return Err("star_pattern_position_tolerance_px must be greater than zero".into());
         }
         Ok(())
@@ -121,17 +124,17 @@ impl AppConfig {
 
     fn load_or_default() -> Self {
         // Try executable directory first
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                let config_path = exe_dir.join("config.json");
-                if let Ok(content) = fs::read_to_string(&config_path) {
-                    match serde_json::from_str(&content) {
-                        Ok(cfg) => return cfg,
-                        Err(e) => eprintln!(
-                            "Warning: failed to parse config.json in executable directory: {}",
-                            e
-                        ),
-                    }
+        if let Ok(exe_path) = std::env::current_exe()
+            && let Some(exe_dir) = exe_path.parent()
+        {
+            let config_path = exe_dir.join("config.json");
+            if let Ok(content) = fs::read_to_string(&config_path) {
+                match serde_json::from_str(&content) {
+                    Ok(cfg) => return cfg,
+                    Err(e) => eprintln!(
+                        "Warning: failed to parse config.json in executable directory: {}",
+                        e
+                    ),
                 }
             }
         }
@@ -231,6 +234,35 @@ struct ImageInfo {
     star5_photons: f64,
 }
 
+/// Sum only the registered stars explicitly enabled for quality metrics.
+/// This is also the signal used to derive the star-pattern SNR.
+fn star_pattern_brightness_adu(stars: &[Star], constellation: &Constellation) -> Option<f64> {
+    if !constellation.found {
+        return None;
+    }
+    Some(
+        constellation
+            .registered_stars
+            .iter()
+            .enumerate()
+            .filter(|(_, star)| star.use_in_quality)
+            .filter_map(|(registered_index, _)| {
+                constellation
+                    .star_mapping
+                    .get(&registered_index)
+                    .and_then(|detected_index| stars.get(*detected_index))
+            })
+            .map(|star| star.magnitude_adu)
+            .sum(),
+    )
+}
+
+fn star_pattern_snr(signal: Option<f64>, background_corrected_adu: f64) -> Option<f64> {
+    signal.and_then(|signal| {
+        (background_corrected_adu > 0.0).then_some(signal / background_corrected_adu.sqrt())
+    })
+}
+
 fn apply_constellation_quality(
     img: &mut AstroImage,
     registered_stars: &[RegisteredStar],
@@ -253,10 +285,7 @@ fn apply_constellation_quality(
         img.recalculate_quality_for_star_indices(&quality_indices, config);
         true
     } else {
-        eprintln!(
-            "Warning: constellation not found in '{}', falling back to regular quality.",
-            label
-        );
+        eprintln!("Warning: star-pattern metrics unavailable for '{}'.", label);
         false
     }
 }
@@ -266,7 +295,7 @@ fn process_single_file(
     crop: Option<f64>,
     save_stars: bool,
     config: &AppConfig,
-    registered_stars: Option<&Vec<RegisteredStar>>,
+    registered_stars: Option<&[RegisteredStar]>,
 ) {
     let mut img = AstroImage::load(path, crop, config).unwrap();
     if let Some(stars) = registered_stars {
@@ -305,7 +334,7 @@ fn load_images(
     entries: &[fs::DirEntry],
     crop: Option<f64>,
     config: &AppConfig,
-    registered_stars: Option<&Vec<RegisteredStar>>,
+    registered_stars: Option<&[RegisteredStar]>,
 ) -> Vec<ImageInfo> {
     let total = entries.len() as u64;
     let pb = ProgressBar::new(total);
@@ -377,20 +406,13 @@ fn load_images(
                     })
                     .unwrap_or_default();
                 let matched_star_count = matched_indices.len();
-                let star_brightness_adu = constellation_found.filter(|found| *found).map(|_| {
-                    quality_indices
-                        .iter()
-                        .filter_map(|i| img.stars().get(*i))
-                        .map(|s| s.magnitude_adu)
-                        .sum::<f64>()
-                });
+                let star_brightness_adu = constellation
+                    .as_ref()
+                    .and_then(|c| star_pattern_brightness_adu(img.stars(), c));
                 let background_raw_adu = img.background_raw_adu();
                 let background_corrected_adu =
                     (background_raw_adu - config.background_bias_adu).max(0.0);
-                let snr = star_brightness_adu.and_then(|signal| {
-                    (background_corrected_adu > 0.0)
-                        .then_some(signal / background_corrected_adu.sqrt())
-                });
+                let snr = star_pattern_snr(star_brightness_adu, background_corrected_adu);
                 if independent_quality.is_finite() {
                     quality_sum += independent_quality;
                     fwhm_sum += independent_fwhm;
@@ -479,7 +501,7 @@ fn write_quality_map(
         .max(8);
     writeln!(
         map_file,
-        "{:<fn_width$}  {:>9}  {:>9}  {:>9}  {:>6}  {:>12}  {:>10}  {}",
+        "{:<fn_width$}  {:>9}  {:>9}  {:>9}  {:>6}  {:>12}  {:>10}  note",
         "filename",
         "fwhm",
         "quality",
@@ -487,7 +509,6 @@ fn write_quality_map(
         "stars",
         "brightest",
         "star5",
-        "note",
         fn_width = fn_width
     )
     .expect("Failed to write header");
@@ -642,7 +663,7 @@ fn config_fingerprint(
                     s.pos.y,
                     s.magnitude,
                     s.use_in_quality,
-                    s.median_brightness,
+                    s.median_brightness_adu,
                     s.median_brightest_pixel_part,
                 )
             })
@@ -657,6 +678,8 @@ fn image_to_metrics(image: &ImageInfo) -> metrics::MetricValues {
         fwhm: image.fwhm,
         star_count: image.star_count,
         brightest_star_adu: image.brightest_star_adu,
+        brightest_star_photons: image.brightest_star_photons,
+        star5_photons: image.star5_photons,
         background_raw_adu: image.background_raw_adu,
         background_corrected_adu: image.background_corrected_adu,
         quality_star_pattern: image.quality_image,
@@ -687,8 +710,8 @@ fn record_to_image(record: &metrics::CacheRecord, dir: &Path) -> ImageInfo {
         brightest_star_adu: m.brightest_star_adu,
         background_raw_adu: m.background_raw_adu,
         background_corrected_adu: m.background_corrected_adu,
-        brightest_star_photons: 0.0,
-        star5_photons: 0.0,
+        brightest_star_photons: m.brightest_star_photons,
+        star5_photons: m.star5_photons,
     }
 }
 
@@ -800,8 +823,17 @@ fn bitmap_text(image: &mut image::RgbImage, x: u32, y: u32, text: &str, color: i
             'G' => [
                 0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111,
             ],
+            'H' => [
+                0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+            ],
             'I' => [
                 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111,
+            ],
+            'K' => [
+                0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+            ],
+            'L' => [
+                0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
             ],
             'M' => [
                 0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
@@ -811,6 +843,9 @@ fn bitmap_text(image: &mut image::RgbImage, x: u32, y: u32, text: &str, color: i
             ],
             'O' => [
                 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+            ],
+            'P' => [
+                0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
             ],
             'Q' => [
                 0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
@@ -823,6 +858,12 @@ fn bitmap_text(image: &mut image::RgbImage, x: u32, y: u32, text: &str, color: i
             ],
             'T' => [
                 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+            ],
+            'U' => [
+                0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+            ],
+            'W' => [
+                0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001,
             ],
             'Y' => [
                 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
@@ -839,6 +880,25 @@ fn bitmap_text(image: &mut image::RgbImage, x: u32, y: u32, text: &str, color: i
             '3' => [
                 0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
             ],
+            '4' => [
+                0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+            ],
+            '5' => [
+                0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110,
+            ],
+            '6' => [
+                0b00111, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+            ],
+            '7' => [
+                0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+            ],
+            '8' => [
+                0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+            ],
+            '9' => [
+                0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b11100,
+            ],
+            '.' => [0, 0, 0, 0, 0, 0, 0b00100],
             '_' => [0, 0, 0, 0, 0, 0, 0b11111],
             '-' => [0, 0, 0, 0b11111, 0, 0, 0],
             ' ' => [0; 7],
@@ -850,10 +910,11 @@ fn bitmap_text(image: &mut image::RgbImage, x: u32, y: u32, text: &str, color: i
         let rows = glyph(c);
         for (row, bits) in rows.iter().enumerate() {
             for col in 0..5 {
-                if bits & (1 << (4 - col)) != 0 {
-                    if cursor + col < image.width() && y + (row as u32) < image.height() {
-                        image.put_pixel(cursor + col, y + (row as u32), color);
-                    }
+                if bits & (1 << (4 - col)) != 0
+                    && cursor + col < image.width()
+                    && y + (row as u32) < image.height()
+                {
+                    image.put_pixel(cursor + col, y + (row as u32), color);
                 }
             }
         }
@@ -911,6 +972,23 @@ fn draw_metric_chart(
     for y in top..(height - bottom) {
         out.put_pixel(left, y, Rgb([0, 0, 0]));
     }
+    // Five Y-axis ticks make the value scale readable even in the bitmap renderer.
+    for tick in 0..=4 {
+        let fraction = tick as f64 / 4.0;
+        let y =
+            height - bottom - 1 - (fraction * (height - top - bottom - 1) as f64).round() as u32;
+        for dx in 0..5 {
+            out.put_pixel(left.saturating_sub(dx), y, Rgb([0, 0, 0]));
+        }
+        let value = min + fraction * range;
+        bitmap_text(
+            &mut out,
+            2,
+            y.saturating_sub(3),
+            &format!("{value:.2}"),
+            Rgb([0, 0, 0]),
+        );
+    }
     for (i, value) in values.iter().enumerate() {
         let x = left + (i as u32 * (width - left - right - 1) / values.len().max(1) as u32);
         let Some(value) = value else {
@@ -931,9 +1009,21 @@ fn draw_metric_chart(
         }
     }
     bitmap_text(&mut out, left + 5, 5, metric.key(), Rgb([0, 0, 0]));
-    bitmap_text(&mut out, width - 190, 5, "M MEDIAN", Rgb([220, 0, 0]));
-    if suggested.is_some() {
-        bitmap_text(&mut out, width - 190, 15, "T THRESHOLD", Rgb([0, 150, 0]));
+    bitmap_text(
+        &mut out,
+        width - 300,
+        5,
+        &format!("M MEDIAN {median:.2}"),
+        Rgb([220, 0, 0]),
+    );
+    if let Some(value) = suggested {
+        bitmap_text(
+            &mut out,
+            width - 300,
+            15,
+            &format!("T THRESHOLD {value:.2}"),
+            Rgb([0, 150, 0]),
+        );
     }
     let line = |out: &mut ImageBuffer<Rgb<u8>, Vec<u8>>, value: f64, color: Rgb<u8>| {
         let y = height
@@ -992,6 +1082,13 @@ fn filter_files(
         .filter(|r| !metrics::passes_all_filters(r, rules, &medians).unwrap_or(false))
         .collect();
     let destination = metrics::unique_removed_folder(dir, rules, metrics::current_timestamp());
+    if rejected.is_empty() {
+        println!(
+            "Kept {} files; no files were rejected or moved.",
+            records.len()
+        );
+        return Ok(());
+    }
     fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
     for record in &rejected {
         let source = dir.join(&record.file_name);
@@ -1016,15 +1113,14 @@ fn filter_files(
 fn process_directory(
     dir: &Path,
     args: &Args,
-    registered_stars: Option<&Vec<RegisteredStar>>,
+    registered_stars: Option<&[RegisteredStar]>,
     config: &AppConfig,
-) {
+) -> Result<(), String> {
     let filter_rules = if args.filter {
         match build_rules(args, registered_stars.is_some()) {
             Ok(rules) => Some(rules),
             Err(e) => {
-                eprintln!("Error: {}", e);
-                return;
+                return Err(e);
             }
         }
     } else {
@@ -1032,20 +1128,15 @@ fn process_directory(
     };
     let all_entries = collect_fits_files(dir);
     if all_entries.is_empty() {
-        eprintln!("No FITS files found.");
-        return;
+        return Err("no FITS files found".into());
     }
     let pattern_file = args
         .star_pattern
         .as_ref()
         .map(PathBuf::from)
         .or_else(|| star_pattern::default_pattern_path(dir));
-    let fingerprint = config_fingerprint(
-        config,
-        args.crop,
-        registered_stars.map(|s| s.as_slice()),
-        pattern_file.as_deref(),
-    );
+    let fingerprint =
+        config_fingerprint(config, args.crop, registered_stars, pattern_file.as_deref());
     let cache_path = dir.join("metrics_cache.json");
     let mut cache = metrics::MetricsCache::load(&cache_path, &fingerprint)
         .unwrap_or_else(|_| metrics::MetricsCache::empty(&fingerprint));
@@ -1121,21 +1212,27 @@ fn process_directory(
         println!("Suggested filters: quality_star_pattern >= 0.83 × median; snr >= 0.707 × median");
     }
     if args.check_count.is_none()
-        && args.filter == false
+        && !args.filter
         && build_rules(args, registered_stars.is_some())
             .map(|r| !r.is_empty())
             .unwrap_or(false)
     {
         eprintln!("Warning: thresholds supplied without --filter; no files moved.");
     }
-    if args.check_count.is_none() && args.filter {
-        if let Some(rules) = filter_rules {
-            if let Err(e) = filter_files(dir, &records, &rules) {
-                eprintln!("Error: {}", e);
-            }
-        }
+    if args.check_count.is_none()
+        && args.filter
+        && let Some(rules) = filter_rules
+        && let Err(e) = filter_files(dir, &records, &rules)
+    {
+        return Err(e);
     }
     if args.check_count.is_none() {
+        // Filtering may have moved files, so chart only the files still in the directory.
+        let chart_records: Vec<_> = records
+            .iter()
+            .filter(|r| dir.join(&r.file_name).is_file())
+            .cloned()
+            .collect();
         for metric in [
             metrics::Metric::Quality,
             metrics::Metric::Fwhm,
@@ -1144,9 +1241,10 @@ fn process_directory(
             metrics::Metric::StarBrightness,
             metrics::Metric::Snr,
         ] {
-            let _ = draw_metric_chart(dir, &records, metric);
+            let _ = draw_metric_chart(dir, &chart_records, metric);
         }
     }
+    Ok(())
 }
 
 fn make_star_pattern(
@@ -1175,6 +1273,7 @@ fn make_star_pattern(
                 x: s.pos.x,
                 y: s.pos.y,
                 magnitude: s.magnitude,
+                magnitude_adu: s.magnitude_adu,
                 // Detector-scale brightness, as required by the 10..50% preference.
                 brightest_pixel_part: (s.brightest_pixel_adu / u16::MAX as f64).clamp(0.0, 1.0),
             })
@@ -1241,9 +1340,20 @@ fn make_star_pattern(
             unique.len() != 3
         }
     {
-        return Err(
-            "select exactly three distinct valid star numbers from the candidate JPEG".into(),
-        );
+        if selected.len() != 3 {
+            return Err("select exactly three star numbers from the candidate JPEG".into());
+        }
+        if selected
+            .iter()
+            .any(|n| *n == 0 || *n > reference_stars.len())
+        {
+            return Err(format!(
+                "star number must be between 1 and {} in the candidate JPEG",
+                reference_stars.len()
+            )
+            .into());
+        }
+        return Err("select three distinct star numbers from the candidate JPEG".into());
     }
     let mut pattern = Vec::new();
     for number in selected {
@@ -1251,14 +1361,19 @@ fn make_star_pattern(
         let aggregate = aggregated
             .iter()
             .find(|a| a.reference_index == reference_index)
-            .ok_or_else(|| format!("star {} was not stable across the sampled frames", number))?;
+            .ok_or_else(|| {
+                format!(
+                    "star {} is a valid JPEG number but is unstable across sampled frames",
+                    number
+                )
+            })?;
         let s = &aggregate.sample;
         pattern.push(star_pattern::StarPatternEntry {
             x: s.x,
             y: s.y,
             magnitude: s.magnitude,
             use_in_quality: true,
-            median_brightness: Some(s.magnitude),
+            median_brightness_adu: Some(s.magnitude_adu),
             median_brightest_pixel_part: Some(s.brightest_pixel_part),
         });
     }
@@ -1271,6 +1386,24 @@ fn make_star_pattern(
 
 fn main() {
     let args = Args::parse();
+
+    // Pattern generation is independent of any pre-existing pattern file.
+    if let Some(folder) = &args.make_star_pattern {
+        let config = AppConfig::load_or_default();
+        if let Err(e) = config.validate() {
+            eprintln!("Error: {}", e);
+            std::process::exit(2);
+        }
+        if let Err(e) = make_star_pattern(
+            Path::new(folder),
+            &config,
+            args.star_pattern_numbers.as_deref(),
+        ) {
+            eprintln!("Error creating star pattern: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let pattern_file: Option<PathBuf> = args
         .star_pattern
@@ -1306,18 +1439,6 @@ fn main() {
         eprintln!("Error: {}", e);
         std::process::exit(2);
     }
-    if let Some(folder) = &args.make_star_pattern {
-        if let Err(e) = make_star_pattern(
-            Path::new(folder),
-            &config,
-            args.star_pattern_numbers.as_deref(),
-        ) {
-            eprintln!("Error creating star pattern: {}", e);
-            std::process::exit(1);
-        }
-        return;
-    }
-
     let path = Path::new(&args.path);
     if path.is_file() {
         process_single_file(
@@ -1325,7 +1446,7 @@ fn main() {
             args.crop,
             args.save_stars,
             &config,
-            registered_stars.as_ref(),
+            registered_stars.as_deref(),
         );
     } else if path.is_dir() {
         if args.save_stars {
@@ -1336,14 +1457,112 @@ fn main() {
                     args.crop,
                     true,
                     &config,
-                    registered_stars.as_ref(),
+                    registered_stars.as_deref(),
                 );
             }
         } else {
-            process_directory(path, &args, registered_stars.as_ref(), &config);
+            if let Err(e) = process_directory(path, &args, registered_stars.as_deref(), &config) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
     } else {
         eprintln!("Error: path does not exist: {}", args.path);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use vector2d::Vector2D;
+
+    #[test]
+    fn filter_does_not_create_removed_folder_when_every_record_passes() {
+        let dir = std::env::temp_dir().join(format!(
+            "lucky-star-filter-test-{}-{}",
+            std::process::id(),
+            metrics::current_timestamp()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.fits"), b"fixture").unwrap();
+        let record = metrics::CacheRecord {
+            file_name: "a.fits".into(),
+            size: 7,
+            modified_ns: 1,
+            cache_format_version: metrics::CACHE_FORMAT_VERSION,
+            algorithm_version: metrics::ALGORITHM_VERSION.into(),
+            configuration_fingerprint: "test".into(),
+            metrics: metrics::MetricValues {
+                quality: 1.0,
+                fwhm: 1.0,
+                star_count: 1,
+                brightest_star_adu: 1.0,
+                brightest_star_photons: 1.0,
+                star5_photons: 0.0,
+                background_raw_adu: 1.0,
+                background_corrected_adu: 1.0,
+                quality_star_pattern: None,
+                star_brightness_adu: None,
+                snr: None,
+                star_pattern_found: false,
+                matched_star_count: 0,
+            },
+        };
+        let rule = metrics::FilterRule::absolute(metrics::Metric::Quality, 0.5).unwrap();
+        filter_files(&dir, &[record], &[rule]).unwrap();
+        assert!(!dir.join("removed_quality_0.500").exists());
+        assert!(dir.join("a.fits").exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn disabled_pattern_stars_do_not_affect_brightness_or_snr() {
+        let stars = vec![
+            Star {
+                pos: Vector2D::new(1, 1),
+                magnitude: 1.0,
+                magnitude_adu: 100.0,
+                brightest_pixel_adu: 1.0,
+                brightest_pixel_part: 1.0,
+                top_4_pixels_part: 1.0,
+                ill_defined: false,
+            },
+            Star {
+                pos: Vector2D::new(2, 2),
+                magnitude: 1.0,
+                magnitude_adu: 900.0,
+                brightest_pixel_adu: 1.0,
+                brightest_pixel_part: 1.0,
+                top_4_pixels_part: 1.0,
+                ill_defined: false,
+            },
+        ];
+        let constellation = Constellation {
+            registered_stars: vec![
+                RegisteredStar {
+                    pos: Vector2D::new(1, 1),
+                    magnitude: 1.0,
+                    use_in_quality: true,
+                    median_brightness_adu: Some(100.0),
+                    median_brightest_pixel_part: None,
+                },
+                RegisteredStar {
+                    pos: Vector2D::new(2, 2),
+                    magnitude: 1.0,
+                    use_in_quality: false,
+                    median_brightness_adu: Some(900.0),
+                    median_brightest_pixel_part: None,
+                },
+            ],
+            found: true,
+            star_mapping: HashMap::from([(0, 0), (1, 1)]),
+            transform: None,
+            position_tolerance_px: 7.0,
+        };
+        let signal = star_pattern_brightness_adu(&stars, &constellation);
+        assert_eq!(signal, Some(100.0));
+        assert_eq!(star_pattern_snr(signal, 25.0), Some(20.0));
     }
 }

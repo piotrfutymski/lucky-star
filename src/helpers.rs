@@ -10,7 +10,7 @@ where
         return None;
     }
 
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         Some((sorted[n / 2 - 1] + sorted[n / 2]) / T::from(2))
     } else {
         Some(sorted[n / 2])

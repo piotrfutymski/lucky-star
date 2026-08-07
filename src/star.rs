@@ -37,7 +37,7 @@ impl Star {
                 }
             }
         }
-        background_adu = background_adu / background_sum as f64;
+        background_adu /= background_sum as f64;
         if background_adu == 0.0 {
             background_adu = background_adu_global as f64;
         }

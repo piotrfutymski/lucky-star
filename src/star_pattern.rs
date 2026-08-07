@@ -9,8 +9,13 @@ pub struct StarPatternEntry {
     pub y: usize,
     pub magnitude: f64,
     pub use_in_quality: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub median_brightness: Option<f64>,
+    /// Median integrated star brightness in ADU.
+    #[serde(
+        default,
+        alias = "median_brightness",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub median_brightness_adu: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub median_brightest_pixel_part: Option<f64>,
 }
@@ -20,6 +25,7 @@ pub struct PatternStarSample {
     pub x: usize,
     pub y: usize,
     pub magnitude: f64,
+    pub magnitude_adu: f64,
     /// Brightest pixel divided by the detector range (0..1), not a fraction
     /// of the star flux.  Keeping this name preserves the original API.
     pub brightest_pixel_part: f64,
@@ -38,7 +44,7 @@ pub fn median(values: &mut [f64]) -> Option<f64> {
     }
     values.sort_by(|a, b| a.total_cmp(b));
     let n = values.len();
-    Some(if n % 2 == 0 {
+    Some(if n.is_multiple_of(2) {
         (values[n / 2 - 1] + values[n / 2]) / 2.0
     } else {
         values[n / 2]
@@ -190,11 +196,11 @@ pub fn aggregate_samples(
                     )
                 })
                 .min_by(|a, b| a.1.total_cmp(&b.1));
-            if let Some((i, d)) = nearest {
-                if d <= tolerance {
-                    used[i] = true;
-                    tracks[ri].push(frame[i].clone());
-                }
+            if let Some((i, d)) = nearest
+                && d <= tolerance
+            {
+                used[i] = true;
+                tracks[ri].push(frame[i].clone());
             }
         }
     }
@@ -214,6 +220,11 @@ pub fn aggregate_samples(
                     x: reference[reference_index].x,
                     y: reference[reference_index].y,
                     magnitude: median(&mut magnitudes)?,
+                    magnitude_adu: {
+                        let mut brightness_adu: Vec<f64> =
+                            values.iter().map(|s| s.magnitude_adu).collect();
+                        median(&mut brightness_adu)?
+                    },
                     brightest_pixel_part: median(&mut brightness)?,
                 },
                 sample_count: values.len(),
@@ -304,6 +315,7 @@ mod tests {
             x,
             y,
             magnitude: m,
+            magnitude_adu: m * 10.0,
             brightest_pixel_part: b,
         }
     }
@@ -361,7 +373,7 @@ mod tests {
             y: 2,
             magnitude: 3.0,
             use_in_quality: false,
-            median_brightness: None,
+            median_brightness_adu: None,
             median_brightest_pixel_part: None,
         }];
         assert!(validate_pattern(&p, 7.0).is_err());

@@ -9,8 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const CACHE_FORMAT_VERSION: u32 = 1;
-pub const ALGORITHM_VERSION: &str = "phase2-metrics-1";
+pub const CACHE_FORMAT_VERSION: u32 = 2;
+pub const ALGORITHM_VERSION: &str = "phase2-metrics-2";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct MetricValues {
@@ -18,6 +18,8 @@ pub struct MetricValues {
     pub fwhm: f64,
     pub star_count: usize,
     pub brightest_star_adu: f64,
+    pub brightest_star_photons: f64,
+    pub star5_photons: f64,
     pub background_raw_adu: f64,
     pub background_corrected_adu: f64,
     pub quality_star_pattern: Option<f64>,
@@ -237,7 +239,7 @@ pub fn median(values: &mut [f64]) -> Option<f64> {
         return None;
     }
     values.sort_by(|a, b| a.total_cmp(b));
-    Some(if values.len() % 2 == 0 {
+    Some(if values.len().is_multiple_of(2) {
         (values[values.len() / 2 - 1] + values[values.len() / 2]) / 2.0
     } else {
         values[values.len() / 2]
@@ -329,6 +331,8 @@ mod tests {
             fwhm: 2.0,
             star_count: 3,
             brightest_star_adu: 10.0,
+            brightest_star_photons: 100.0,
+            star5_photons: 50.0,
             background_raw_adu: 20.0,
             background_corrected_adu: 20.0,
             quality_star_pattern: snr,
@@ -359,10 +363,10 @@ mod tests {
         let mut cache = MetricsCache::empty("config-a");
         cache.upsert(record("a.fits", 0.9, Some(10.0)));
         cache.save(&path).unwrap();
-        assert_eq!(
-            MetricsCache::load(&path, "config-a").unwrap().records.len(),
-            1
-        );
+        let loaded = MetricsCache::load(&path, "config-a").unwrap();
+        assert_eq!(loaded.records.len(), 1);
+        assert_eq!(loaded.records[0].metrics.brightest_star_photons, 100.0);
+        assert_eq!(loaded.records[0].metrics.star5_photons, 50.0);
         assert!(
             MetricsCache::load(&path, "config-b")
                 .unwrap()
@@ -382,7 +386,7 @@ mod tests {
         let med = medians(&records);
         let quality = FilterRule::relative(Metric::Quality, 0.83).unwrap();
         let snr = FilterRule::relative(Metric::Snr, 0.707).unwrap();
-        assert!(passes_all_filters(&records[0], &[quality.clone()], &med).unwrap());
+        assert!(passes_all_filters(&records[0], std::slice::from_ref(&quality), &med).unwrap());
         assert!(!passes_all_filters(&records[1], &[quality, snr.clone()], &med).unwrap());
         assert!(!passes_all_filters(&records[2], &[snr], &med).unwrap());
     }

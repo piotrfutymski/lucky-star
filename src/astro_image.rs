@@ -65,7 +65,7 @@ impl AstroImage {
         let adu_e: f64 = *config
             .gain_to_adu
             .get(&gain)
-            .expect(format!("No adu_e defined for gain {}", gain).as_str());
+            .unwrap_or_else(|| panic!("No adu_e defined for gain {}", gain));
         let res = Self {
             width,
             height,
@@ -115,10 +115,7 @@ impl AstroImage {
                     (rng.random::<u32>() % self.height) as usize,
                 )
             })
-            .map(|idx| {
-                let data = (data[[idx.0, idx.1]].wrapping_sub(i16::MIN) as u16) as f32;
-                data
-            })
+            .map(|idx| (data[[idx.0, idx.1]].wrapping_sub(i16::MIN) as u16) as f32)
             .collect::<Array1<f32>>();
 
         let mean = samples.mean().unwrap_or(0.);
@@ -126,7 +123,7 @@ impl AstroImage {
         let samples_no_stars = samples
             .iter()
             .filter(|s| **s < mean + 3.0 * sigma)
-            .map(|e| *e)
+            .copied()
             .collect::<Array1<f32>>();
         let background_value = samples_no_stars.mean().unwrap_or(0.0);
         let sigma = samples_no_stars.std(0.);
@@ -235,7 +232,7 @@ impl AstroImage {
             let mut top4_vals: Vec<f64> = stars.iter().map(|s| s.top_4_pixels_part).collect();
             top4_vals.sort_by(|a, b| a.total_cmp(b));
             let n = top4_vals.len();
-            let median = if n % 2 == 0 {
+            let median = if n.is_multiple_of(2) {
                 (top4_vals[n / 2 - 1] + top4_vals[n / 2]) / 2.0
             } else {
                 top4_vals[n / 2]
@@ -439,7 +436,7 @@ impl AstroImage {
                 .map(|s| s.top_4_pixels_part)
                 .collect();
             fwhms.sort_by(|a, b| a.total_cmp(b));
-            if n % 2 == 0 {
+            if n.is_multiple_of(2) {
                 (fwhms[n / 2 - 1] + fwhms[n / 2]) / 2.0
             } else {
                 fwhms[n / 2]
