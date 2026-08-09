@@ -166,6 +166,10 @@ struct Args {
     #[arg(long)]
     filter: bool,
 
+    /// After filtering, divide kept files into batches: --divide METRIC COUNT
+    #[arg(long, value_names = ["METRIC", "COUNT"], num_args = 2)]
+    divide: Option<Vec<String>>,
+
     /// Show detailed processing diagnostics.
     #[arg(long)]
     verbose: bool,
@@ -708,6 +712,7 @@ fn build_rules(args: &Args, has_pattern: bool) -> Result<Vec<metrics::FilterRule
     if args.filter && rules.is_empty() {
         rules.push(metrics::FilterRule::relative(QualityStarPattern, 0.8)?);
         rules.push(metrics::FilterRule::relative(Background, 2.0)?);
+        rules.push(metrics::FilterRule::relative(Snr, 0.7)?);
         rules.push(metrics::FilterRule::relative(StarBrightness, 0.7)?);
     }
     if rules.iter().any(|r| r.metric.requires_pattern()) && !has_pattern {
@@ -1067,12 +1072,91 @@ fn filter_files(
     Ok(())
 }
 
+/// Parse the two arguments of --divide.  Keeping this separate from clap also
+/// makes the accepted metric names and validation explicit to the user.
+fn parse_divide(value: &[String]) -> Result<(metrics::Metric, usize), String> {
+    if value.len() != 2 {
+        return Err("--divide requires METRIC and COUNT, e.g. --divide snr 1000".into());
+    }
+    let metric_name = value[0].to_ascii_lowercase().replace('-', "_");
+    let metric = match metric_name.as_str() {
+        "quality" => metrics::Metric::Quality,
+        "fwhm" => metrics::Metric::Fwhm,
+        "quality_star_pattern" => metrics::Metric::QualityStarPattern,
+        "background" => metrics::Metric::Background,
+        "star_brightness" => metrics::Metric::StarBrightness,
+        "snr" => metrics::Metric::Snr,
+        _ => return Err(format!(
+            "unknown --divide metric '{}'; choose quality, fwhm, quality_star_pattern, background, star_brightness or snr",
+            value[0]
+        )),
+    };
+    let count = value[1].parse::<usize>().map_err(|_| {
+        format!("invalid --divide COUNT '{}'; COUNT must be a positive integer", value[1])
+    })?;
+    if count == 0 {
+        return Err("--divide COUNT must be greater than zero".into());
+    }
+    Ok((metric, count))
+}
+
+fn divide_files(
+    dir: &Path,
+    records: &[metrics::MetricRecord],
+    metric: metrics::Metric,
+    batch_size: usize,
+) -> Result<(), String> {
+    // At this point rejected files have already been moved.  Checking the
+    // source path makes this function operate only on files which passed.
+    let mut kept: Vec<&metrics::MetricRecord> = records
+        .iter()
+        .filter(|record| dir.join(&record.file_name).is_file())
+        .collect();
+    kept.sort_by(|a, b| {
+        let av = metric.value(&a.metrics).filter(|v| v.is_finite());
+        let bv = metric.value(&b.metrics).filter(|v| v.is_finite());
+        match (av, bv) {
+            (Some(a_value), Some(b_value)) => {
+                let ordering = if metric.higher_is_better() { b_value.total_cmp(&a_value) } else { a_value.total_cmp(&b_value) };
+                ordering.then_with(|| a.file_name.cmp(&b.file_name))
+            }
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.file_name.cmp(&b.file_name),
+        }
+    });
+
+    if kept.iter().any(|r| metric.value(&r.metrics).filter(|v| v.is_finite()).is_none()) {
+        return Err(format!(
+            "cannot divide files: metric '{}' is unavailable for one or more kept files",
+            metric.key()
+        ));
+    }
+    for (batch_index, chunk) in kept.chunks(batch_size).enumerate() {
+        let folder = dir.join(format!("{}_{}", batch_index + 1, metric.key()));
+        fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        for record in chunk {
+            let source = dir.join(&record.file_name);
+            let target = folder.join(&record.file_name);
+            fs::rename(&source, &target)
+                .or_else(|_| fs::copy(&source, &target).map(|_| ()).and_then(|_| fs::remove_file(&source)))
+                .map_err(|e| e.to_string())?;
+        }
+        println!("{}: moved {} files to {}", folder.file_name().unwrap().to_string_lossy(), chunk.len(), folder.display());
+    }
+    Ok(())
+}
+
 fn process_directory(
     dir: &Path,
     args: &Args,
     registered_stars: Option<&[RegisteredStar]>,
     config: &AppConfig,
 ) -> Result<(), String> {
+    if args.divide.is_some() && !args.filter {
+        return Err("--divide must be used together with --filter".into());
+    }
+    let divide = args.divide.as_deref().map(parse_divide).transpose()?;
     let filter_rules = if args.filter {
         match build_rules(args, registered_stars.is_some()) {
             Ok(rules) => Some(rules),
@@ -1118,9 +1202,11 @@ fn process_directory(
     if args.check_count.is_none()
         && args.filter
         && let Some(rules) = filter_rules
-        && let Err(e) = filter_files(dir, &records, &rules)
     {
-        return Err(e);
+        filter_files(dir, &records, &rules)?;
+        if let Some((metric, batch_size)) = divide {
+            divide_files(dir, &records, metric, batch_size)?;
+        }
     }
     if args.check_count.is_none() {
         // Filtering may have moved files, so chart only the files still in the directory.
